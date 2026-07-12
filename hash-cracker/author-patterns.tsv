@@ -1,0 +1,19 @@
+# Pattern keyword groups for author-style Wwise source names.
+# Columns: group, category, comma-separated keywords.
+# Character names and version folders are read from ZenlessData at runtime.
+actions	Accompany	Doubt,Eat,Embarrassed,EnterCinema,EnterFlowerShop,EnterGameShop,EnterHotpotShop,Excited,Laugh,Smile,Suprised
+emotions	Breath	Angry,Doubt,Happy,Idle,Sad,Scare,Shy,Surprise,Thinking
+archetypes	Breath	MiasmaFiend
+ages	NPC	Child
+role-bases	NPC	Old,Guard,Chasingsoldiers,Soldier,Civilian,Police,Gentlehouse,Subordinate
+role-prefixes	NPC	Thin,Fat,Old
+role-suffixes	NPC	A,B,C
+families	GalGame	Chapter,Reliability
+common-speakers	GalGame	Belle,Wise,Fairy,NPC,BombBelle,BombWise,Effect
+numbered-chapters	GalGame	0,1,2
+special-scenes	GalGame	ActivityCinema,ActivityLighter,ActivityLivehouse,ActivityOverlord,ActivityPaleland,ActivityPoliceOffice,BangBooAB,ForbiddenArea,GoldenWeek,Limbotask,MonsterFantasy,Special1UndercoverRB,Special2VirtualRevenge,Special3AstraNomicalMoment,SpringFestival,Summer,TGS,UltimateAngler
+chapters	Comic	0,1,2,3,4,5
+ranks	Chessboard	MRL,SRL
+timeline-roots	TL	Timeline_Cs,Timeline_Csr,Timeline_EP,Timeline_MainCity,Vo_Csr_Timeline
+actions	Tips	Enterbadcattle,Entercattle,Exitcattle,Getcoin,Getgear,Getresources,Heal,Hurt,Negativeaspiration,Positiveaspiration,Pressuredown,Pressureup,Removecurse,Sealchoose,Sealpressure,Sealspend,Support,Unlockmap
+actions	Bubble	Greet_AM,Greet_PM,Promote,Scare
