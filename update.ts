@@ -387,5 +387,21 @@ if (gameVersion) {
   await writeFile(join(import.meta.dirname, 'README.md'), readme.replace(/Last update at `([^`]+)`(?:, game version `[^`]+`)?/, `Last update at \`$1\`, game version \`${gameVersion}\``))
 }
 console.log('Copying dataset README...')
-await copyReadme(join(import.meta.dirname, 'README.md'), join(RESULT_PATH, 'README.md'), '---\ntags:\n- audio\n- zenless-zone-zero\n---')
+const huggingfaceMetadata = `---
+task_categories:
+- audio-classification
+- automatic-speech-recognition
+- text-to-speech
+language:
+- zh
+- en
+- ja
+- ko
+pretty_name: Zenless Voice
+tags:
+- audio
+- zenless-zone-zero
+---`
+
+await copyReadme(join(import.meta.dirname, 'README.md'), join(RESULT_PATH, 'README.md'), huggingfaceMetadata)
 console.log('Done')
