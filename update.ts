@@ -20,7 +20,7 @@ const gameVersion = await (async () => {
     return ''
   }
 })()
-const HASH_MATCHES_PATH = join(import.meta.dirname, 'hash-matches.tsv')
+const HASH_MATCHES_PATH = process.env.VOICE_HASH_MATCHES_PATH || join(import.meta.dirname, 'hash-matches.tsv')
 const EVENT_WAVS_PATH = join(import.meta.dirname, 'event-wavs.tsv')
 const GALGAME_PERFORM_PATH = process.env.VOICE_GALGAME_PERFORM_PATH || join(import.meta.dirname, 'StreamingAssets', 'GalGamePerform')
 const GALGAME_EVIDENCE_PATH = process.env.VOICE_GALGAME_EVIDENCE || join(RESULT_PATH, 'galgame-text-evidence.jsonl')
@@ -124,6 +124,21 @@ const indexConfigRows = (value: Json): void => {
 for (const table of sourceTables) indexConfigRows(await readJSON<Json>(join(DATA_PATH, 'FileCfg', table)))
 
 const audioResource = await readJSON<{ tagedEvents?: number[], tags?: string[] }>(join(DATA_PATH, 'Data', 'JsonBytes', 'Audio', 'AudioResourceData.json'))
+const voiceData = await readJSON<{ allPrefixes?: unknown }>(join(DATA_PATH, 'Data', '_unsorted', 'VoiceData.json'))
+type GalGamePrefix = { path: string, speaker: string }
+const galGamePrefixesBySpeaker = new Map<string, GalGamePrefix[]>()
+if (Array.isArray(voiceData.allPrefixes)) {
+  for (const value of voiceData.allPrefixes) {
+    if (typeof value !== 'string') continue
+    const match = /^VO_Galgame\/(?:[A-Za-z0-9_.-]+\/)*VO_([A-Za-z0-9]+)\/$/i.exec(value)
+    if (!match) continue
+    const speaker = match[1]
+    const key = speaker.toLowerCase()
+    const prefixes = galGamePrefixesBySpeaker.get(key) ?? []
+    if (!prefixes.some(prefix => prefix.path.toLowerCase() === value.toLowerCase())) prefixes.push({ path: value, speaker })
+    galGamePrefixesBySpeaker.set(key, prefixes)
+  }
+}
 const speakerEventToSpeaker: Record<string, string> = {}
 for (let index = 0; index < (audioResource.tagedEvents?.length ?? 0);) {
   const event = audioResource.tagedEvents![index++]
@@ -212,6 +227,8 @@ const compatibleGalGameEvidence = (source: string, textId: string) => {
 const galGameSourceToText = new Map<string, string>()
 const officialGalGameSources = new Set<string>()
 const ambiguousOfficialGalGameSources = new Set<string>()
+type OfficialGalGameRecord = { source: string, sourceKey: string, textId: string }
+const officialGalGameRecords: OfficialGalGameRecord[] = []
 console.log('Reading official GalScript voice-to-TextMap index...')
 try {
   const manifest = JSON.parse(await readFile(join(GALGAME_PERFORM_PATH, 'manifest.json'), 'utf8')) as { blocks?: unknown }
@@ -219,10 +236,12 @@ try {
   const extracted = galGameLinksFromBlocks(await Promise.all(manifest.blocks.map(block => readFile(join(GALGAME_PERFORM_PATH, block)))))
   await writeFile(join(RESULT_PATH, 'galgame-perform-links.tsv'),
     '# GalScript voiceKey/externalVoiceKey\tdialogueKey\n' +
-    [...extracted.links].sort(([left], [right]) => left.localeCompare(right)).map(([source, textId]) => `${source}\t${textId}\n`).join(''))
+    [...extracted.links].sort(([left], [right]) => left.localeCompare(right)).map(([source, textId]) => `${extracted.sourceNames.get(source) ?? source}\t${textId}\n`).join(''))
   for (const [source, textId] of extracted.links) {
+    const sourceName = extracted.sourceNames.get(source) ?? source
+    officialGalGameRecords.push({ source: sourceName, sourceKey: galGameSourceKey(sourceName), textId })
     if (!textKeys.has(textId)) continue
-    const key = galGameSourceKey(source)
+    const key = galGameSourceKey(sourceName)
     const previous = galGameSourceToText.get(key)
     if (previous && previous !== textId) {
       galGameSourceToText.delete(key)
@@ -357,6 +376,110 @@ for (const filename of wavs) {
 }
 console.log(`${Object.keys(voiceMap).length} wavs found (${keysByHex.size} distinct hex ids, ${Object.keys(voiceMap).length - [...keysByHex.values()].reduce((n, a) => n + a.length, 0)} decimal)`)
 
+// GalScript supplies the exact voice leaf while VoiceData supplies every
+// game-owned VO_Galgame prefix. Build only speaker-compatible full paths and
+// use the external WAV's FNV-1 64 id as an exact verifier, never as a source of
+// guessed filename components.
+type GalScriptFilename = OfficialGalGameRecord & {
+  speaker: string
+  resolution: 'literal-full-path' | 'single-official-prefix' | 'unique-hash-match'
+}
+const FNV64_OFFSET_HIGH = 0xcbf29ce4
+const FNV64_OFFSET_LOW = 0x84222325
+const FNV64_LOW_PRIME = 0x1b3
+const fnv1Hex64 = (value: string) => {
+  let high = FNV64_OFFSET_HIGH
+  let low = FNV64_OFFSET_LOW
+  for (const byte of Buffer.from(value)) {
+    const lowProduct = low * FNV64_LOW_PRIME
+    high = (Math.imul(high, FNV64_LOW_PRIME) + Math.floor(lowProduct / 0x100000000) + ((low << 8) >>> 0)) >>> 0
+    low = ((lowProduct >>> 0) ^ byte) >>> 0
+  }
+  return high.toString(16).padStart(8, '0') + low.toString(16).padStart(8, '0')
+}
+const languageTokens = new Map<string, Set<string>>()
+for (const [key, voice] of Object.entries(voiceMap)) {
+  const token = key.split('/').find(part => /^[A-Za-z]{2,}\([A-Za-z]+\)$/.test(part))?.toLowerCase()
+  if (!token || !voice.language) continue
+  const tokens = languageTokens.get(voice.language) ?? new Set<string>()
+  tokens.add(token)
+  languageTokens.set(voice.language, tokens)
+}
+const languageToken = new Map<string, string>()
+for (const config of LANGUAGE_CONFIG) {
+  const tokens = languageTokens.get(config.name) ?? new Set<string>()
+  if (tokens.size === 1) languageToken.set(config.name, [...tokens][0])
+  else console.log(`GalScript filename matching disabled for ${config.name}: expected one language token, found ${tokens.size}`)
+}
+
+const galScriptFilenames = new Map<string, GalScriptFilename>()
+const ambiguousGalScriptHashes = new Set<string>()
+let galScriptCandidatePaths = 0
+let literalGalScriptSources = 0
+let singlePrefixGalScriptSources = 0
+const addGalScriptFilename = (hex: string, candidate: GalScriptFilename) => {
+  const previous = galScriptFilenames.get(hex)
+  if (previous && previous.source.toLowerCase() !== candidate.source.toLowerCase()) {
+    galScriptFilenames.delete(hex)
+    ambiguousGalScriptHashes.add(hex)
+  } else if (!previous && !ambiguousGalScriptHashes.has(hex)) {
+    galScriptFilenames.set(hex, candidate)
+  }
+}
+for (const record of officialGalGameRecords) {
+  const candidates = new Map<string, { source: string, speaker: string }>()
+  if (record.source.includes('/')) {
+    const folders = [...record.source.matchAll(/(?:^|\/)VO_([A-Za-z0-9]+)(?=\/)/g)]
+    const speaker = folders.at(-1)?.[1] ?? ''
+    candidates.set(record.source.toLowerCase(), { source: record.source, speaker })
+    literalGalScriptSources++
+  } else {
+    const speakerKeys = new Set(record.sourceKey.split('_').filter(token => galGamePrefixesBySpeaker.has(token.toLowerCase())).map(token => token.toLowerCase()))
+    for (const speakerKey of speakerKeys) {
+      for (const prefix of galGamePrefixesBySpeaker.get(speakerKey) ?? []) {
+        const source = prefix.path + record.source
+        candidates.set(source.toLowerCase(), { source, speaker: prefix.speaker })
+      }
+    }
+    if (candidates.size === 1) singlePrefixGalScriptSources++
+  }
+  galScriptCandidatePaths += candidates.size
+  const resolution = record.source.includes('/')
+    ? 'literal-full-path'
+    : candidates.size === 1 ? 'single-official-prefix' : 'unique-hash-match'
+  for (const candidate of candidates.values()) {
+    for (const config of LANGUAGE_CONFIG) {
+      const token = languageToken.get(config.name)
+      if (!token) continue
+      const hex = fnv1Hex64(`${token}/ex/${candidate.source}.wem`.toLowerCase())
+      const targetKeys = keysByHex.get(hex)
+      if (!targetKeys?.some(key => voiceMap[key]?.language === config.name)) continue
+      addGalScriptFilename(hex, { ...record, ...candidate, resolution })
+    }
+  }
+}
+
+const conflictingFilenameHashes = new Set<string>()
+let galScriptCrackerAgreements = 0
+let galScriptOnlyMatches = 0
+for (const [hex, candidate] of galScriptFilenames) {
+  const cracked = crackedFilenames.get(hex)
+  if (!cracked) {
+    galScriptOnlyMatches++
+  } else if (cracked.source.toLowerCase() === candidate.source.toLowerCase()) {
+    galScriptCrackerAgreements++
+  } else {
+    conflictingFilenameHashes.add(hex)
+  }
+}
+for (const hex of conflictingFilenameHashes) galScriptFilenames.delete(hex)
+await writeFile(join(RESULT_PATH, 'galgame-path-matches.tsv'),
+  '# wavHash\tfullPath\tdialogueKey\tresolution\n' +
+  [...galScriptFilenames].sort(([left], [right]) => left.localeCompare(right)).map(([hex, match]) => `${hex}\t${match.source}\t${match.textId}\t${match.resolution}\n`).join(''))
+console.log(`${galScriptFilenames.size} WAV filenames resolved directly from ${officialGalGameRecords.length} GalScript links + ${[...galGamePrefixesBySpeaker.values()].reduce((count, prefixes) => count + prefixes.length, 0)} VoiceData prefixes`)
+console.log(`  ${galScriptCandidatePaths} official full-path candidates (${literalGalScriptSources} literal sources, ${singlePrefixGalScriptSources} single-prefix sources)`)
+console.log(`  ${galScriptCrackerAgreements} agree with cracker, ${galScriptOnlyMatches} newly resolved, ${conflictingFilenameHashes.size} conflicts rejected${ambiguousGalScriptHashes.size ? `, ${ambiguousGalScriptHashes.size} GalScript hash ambiguities rejected` : ''}`)
+
 // A source's game-owned localized transcription: resolve its TextMap ids, drop speaker
 // name / title ids (e.g. ClueName_*, GalNPC<Char>, Avatar_*) that are not spoken
 // lines, and de-duplicate repeated segments.
@@ -414,14 +537,17 @@ let inGameFilenameMatched = 0
 console.log('Matching metadata...')
 for (const [key, voice] of Object.entries(voiceMap)) {
   const hex = hexOfKey(key)
-  const cracked = hex ? crackedFilenames.get(hex) : undefined
+  const pathConflict = hex ? conflictingFilenameHashes.has(hex) : false
+  const galScript = hex && !pathConflict ? galScriptFilenames.get(hex) : undefined
+  const cracked = hex && !pathConflict ? crackedFilenames.get(hex) : undefined
   const events = new Set<string>([...(eventsByKey.get(key) ?? []), ...(hex ? eventsByHex.get(hex) ?? [] : [])])
-  const sourcePath = cracked?.source ?? (hex ? pckWavToPath[hex] : undefined)
+  const sourcePath = galScript?.source ?? cracked?.source ?? (hex ? pckWavToPath[hex] : undefined)
 
   // --- transcription: only when a single TextMap id is unambiguously implied ---
-  // Chain B (cracked source): an exact 64-bit filename match to a source that
-  // actually co-occurs with TextMap ids in a game config -> use those ids.
-  const sourceInfo = cracked?.sourceKey ? sourceToText[cracked.sourceKey] : undefined
+  // Chain B (direct GalScript or cracked source): an exact 64-bit filename
+  // match to a source that co-occurs with TextMap ids in game config -> use it.
+  const sourceKey = galScript?.sourceKey ?? cracked?.sourceKey
+  const sourceInfo = sourceKey ? sourceToText[sourceKey] : undefined
   const crackedText = sourceInfo ? sourceTranscript(sourceInfo, voice.language) : ''
   const galGameTextId = sourcePath ? galGameSourceToText.get(galGameSourceKey(sourcePath)) : undefined
   const galGameText = galGameTextId ? transcriptFor(voice.language, galGameTextId) : ''
@@ -436,7 +562,9 @@ for (const [key, voice] of Object.entries(voiceMap)) {
 
   // --- speaker: event -> speaker (both chains), unambiguous only. No folder->speaker. ---
   const eventSpeakers = new Set([...events].map(speakerForEvent).filter(Boolean))
-  const pathSpeaker = cracked ? resolveSpeaker(cracked.speaker) : sourcePath ? (resolveSpeaker(pathToSpeaker[sourcePath]) || speakerFromPath(sourcePath)) : ''
+  const pathSpeaker = galScript
+    ? resolveSpeaker(galScript.speaker)
+    : cracked ? resolveSpeaker(cracked.speaker) : sourcePath ? (resolveSpeaker(pathToSpeaker[sourcePath]) || speakerFromPath(sourcePath)) : ''
   const speaker = pathSpeaker || (eventSpeakers.size === 1 ? [...eventSpeakers][0] : '')
 
   // --- readable in-game identifier: source path if known, else event name(s)/hash(es) ---

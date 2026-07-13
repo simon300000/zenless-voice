@@ -9,7 +9,7 @@ Last update at `2026-07-13`, game version `3.0.0`
 
 `83768` without speaker (23%)
 
-`113634` without transcription (32%)
+`113270` without transcription (31%)
 
 `65489` without inGameFilename (18%)
 <!-- STATS_END -->

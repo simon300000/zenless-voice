@@ -26,5 +26,7 @@ The default is `result/`.
 
 When `StreamingAssets/GalGamePerform/manifest.json` is available, `npm run
 crack` also extracts the official GalScript `voiceKey` values and adds them to
-the filename dictionary automatically. `VOICE_GALGAME_PERFORM_PATH` changes
-that resource directory.
+the filename dictionary automatically. GalScript leaves first try only the
+speaker-compatible official `VoiceData` prefixes; the full prefix set remains
+as a fallback for authored directory aliases. `VOICE_GALGAME_PERFORM_PATH`
+changes that resource directory.

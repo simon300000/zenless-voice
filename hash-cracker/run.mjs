@@ -21,7 +21,7 @@ try {
   await mkdir(resultRoot, { recursive: true })
   await writeFile(dictionaryPath,
     '# GalScript voiceKey/externalVoiceKey\tdialogueKey\n' +
-    [...extracted.links].sort(([left], [right]) => left.localeCompare(right)).map(([source, textId]) => `${source}\t${textId}\n`).join(''))
+    [...extracted.links].sort(([left], [right]) => left.localeCompare(right)).map(([source, textId]) => `${extracted.sourceNames.get(source) ?? source}\t${textId}\n`).join(''))
   environment.VOICE_GALSCRIPT_DICTIONARY = dictionaryPath
   console.log(`Loaded ${extracted.links.size} game-owned GalScript voice keys for filename cracking`)
 } catch (error) {

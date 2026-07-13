@@ -68,6 +68,7 @@ struct SourceCandidate {
   std::string source;
   std::string speaker;
   std::string category;
+  std::vector<std::string> prefixSpeakers;
 };
 
 struct LocalScene {
@@ -740,6 +741,10 @@ int main(int argc, char** argv) {
       prefixes.push_back(std::move(*prefix));
     }
   }
+  std::unordered_set<std::string> galGamePrefixSpeakers;
+  for (const Prefix& prefix : prefixes) {
+    if (prefix.category == "VO_Galgame") galGamePrefixSpeakers.insert(lower(prefix.speaker));
+  }
 
   std::vector<SourceCandidate> sourceCandidates;
   sourceCandidates.reserve(sourceCandidateStrings.size() + 40000);
@@ -752,7 +757,7 @@ int main(int argc, char** argv) {
     const bool verifiedVoidBlock = slash == std::string::npos && voidBlocks.find(fnv32(leaf)) != voidBlocks.end();
     if (slash == std::string::npos && category.empty() && !verifiedVoidBlock) continue;
     if (sourceCandidateKeys.insert(lower(source)).second) {
-      sourceCandidates.push_back(SourceCandidate{source, "", verifiedVoidBlock ? "" : category});
+      sourceCandidates.push_back(SourceCandidate{source, "", verifiedVoidBlock ? "" : category, {}});
     }
   }
 
@@ -768,9 +773,19 @@ int main(int argc, char** argv) {
       if (line.empty() || line[0] == '#') continue;
       const std::size_t tab = line.find('\t');
       const std::string source = line.substr(0, tab);
-      if (lower(source).rfind("galgame_", 0) != 0) continue;
+      const std::size_t slash = source.find_last_of('/');
+      const std::string leaf = slash == std::string::npos ? source : source.substr(slash + 1);
+      if (lower(leaf).rfind("galgame_", 0) != 0) continue;
       if (!sourceCandidateKeys.insert(lower(source)).second) continue;
-      sourceCandidates.push_back(SourceCandidate{source, "", "VO_Galgame"});
+      std::vector<std::string> prefixSpeakers;
+      if (slash == std::string::npos) {
+        const std::vector<std::string> parts = split(lower(leaf), '_');
+        for (const std::string& part : parts) {
+          if (galGamePrefixSpeakers.find(part) == galGamePrefixSpeakers.end()) continue;
+          if (std::find(prefixSpeakers.begin(), prefixSpeakers.end(), part) == prefixSpeakers.end()) prefixSpeakers.push_back(part);
+        }
+      }
+      sourceCandidates.push_back(SourceCandidate{source, "", "VO_Galgame", std::move(prefixSpeakers)});
       galScriptSourceCount++;
     }
   }
@@ -932,9 +947,9 @@ int main(int argc, char** argv) {
   for (std::thread& thread : threads) thread.join();
   logTiming("crack legacy GalGame scenes (" + std::to_string(legacyGalGameScenes.size()) + ")", legacyCrackStart);
 
-  // Direct source names are already mined from ZenlessData config rows. Hash
-  // them here too, so update.ts never repeats the expensive bare-leaf x prefix
-  // product with JavaScript BigInt arithmetic.
+  // Direct source names are mined from ZenlessData config rows and GalScript.
+  // GalScript leaves first try only speaker-compatible official prefixes; the
+  // exhaustive product remains a fallback for authored directory aliases.
   const auto sourceCrackStart = Clock::now();
   next.store(0, std::memory_order_relaxed);
   threads.clear();
@@ -945,28 +960,40 @@ int main(int argc, char** argv) {
       if (index >= sourceCandidates.size()) break;
       const SourceCandidate& candidate = sourceCandidates[index];
       const std::string filename = candidate.source + ".wem";
-      for (const Language& language : languages) {
-        if (candidate.source.find('/') != std::string::npos) {
+      if (candidate.source.find('/') != std::string::npos) {
+        for (const Language& language : languages) {
           const std::uint64_t hash = fold(language.baseState, filename, true);
           if (language.targetHashes.find(hash) != language.targetHashes.end()) local.push_back(Match{hash, candidate.speaker, candidate.source, candidate.source});
-          continue;
         }
-        const auto tryPrefixes = [&](const std::vector<HashedPrefix>& hashedPrefixes) {
-          for (const HashedPrefix& hashedPrefix : hashedPrefixes) {
-            const Prefix& prefix = *hashedPrefix.prefix;
-            if (!prefix.gameOwned) continue;
-            const std::uint64_t hash = fold(hashedPrefix.state, filename, true);
-            if (language.targetHashes.find(hash) == language.targetHashes.end()) continue;
-            local.push_back(Match{hash, candidate.speaker.empty() ? prefix.speaker : candidate.speaker, prefix.path + candidate.source, candidate.source});
-          }
-        };
-        if (!candidate.category.empty()) {
-          const auto found = language.prefixesByCategory.find(candidate.category);
-          if (found != language.prefixesByCategory.end()) tryPrefixes(found->second);
-        } else {
-          for (const auto& [_, hashedPrefixes] : language.prefixesByCategory) tryPrefixes(hashedPrefixes);
-        }
+        continue;
       }
+      bool candidateMatched = false;
+      const auto tryCandidate = [&](bool restrictSpeakers) {
+        for (const Language& language : languages) {
+          const auto tryPrefixes = [&](const std::vector<HashedPrefix>& hashedPrefixes) {
+            for (const HashedPrefix& hashedPrefix : hashedPrefixes) {
+              const Prefix& prefix = *hashedPrefix.prefix;
+              if (!prefix.gameOwned) continue;
+              if (restrictSpeakers && !candidate.prefixSpeakers.empty() && std::find(candidate.prefixSpeakers.begin(), candidate.prefixSpeakers.end(), lower(prefix.speaker)) == candidate.prefixSpeakers.end()) continue;
+              const std::uint64_t hash = fold(hashedPrefix.state, filename, true);
+              if (language.targetHashes.find(hash) == language.targetHashes.end()) continue;
+              candidateMatched = true;
+              local.push_back(Match{hash, candidate.speaker.empty() ? prefix.speaker : candidate.speaker, prefix.path + candidate.source, candidate.source});
+            }
+          };
+          if (!candidate.category.empty()) {
+            const auto found = language.prefixesByCategory.find(candidate.category);
+            if (found != language.prefixesByCategory.end()) tryPrefixes(found->second);
+          } else {
+            for (const auto& [_, hashedPrefixes] : language.prefixesByCategory) tryPrefixes(hashedPrefixes);
+          }
+        }
+      };
+      tryCandidate(true);
+      // A small number of authored aliases use a different VO_<speaker>
+      // directory (for example Anbi -> SPAnbi). Preserve the exhaustive path
+      // as a fallback only when the compatible-prefix pass found nothing.
+      if (!candidate.prefixSpeakers.empty() && !candidateMatched) tryCandidate(false);
     }
     std::lock_guard<std::mutex> lock(matchesMutex);
     matches.insert(matches.end(), std::make_move_iterator(local.begin()), std::make_move_iterator(local.end()));

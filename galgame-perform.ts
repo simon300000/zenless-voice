@@ -205,7 +205,7 @@ const utf16AsciiStrings = (data: Uint8Array) => {
   return values
 }
 
-const SOURCE = /^GalGame_[A-Za-z0-9_-]+$/i
+const SOURCE = /^(?:VO_Galgame\/(?:[A-Za-z0-9_.-]+\/)*VO_[A-Za-z0-9]+\/)?GalGame_[A-Za-z0-9_-]+$/i
 const STRICT_SOURCE = /^GalGame_[A-Za-z0-9_-]+$/
 const STRICT_TEXT_ID = /^[A-Za-z0-9_]+_GalGame_[A-Za-z0-9_-]+_\d+_\d+$/
 const DIALOGUE_KEY = /^[A-Za-z0-9_-]+$/
@@ -213,11 +213,13 @@ const DIALOGUE_KEY = /^[A-Za-z0-9_-]+$/
 export const galGameLinksFromBlocks = (blocks: readonly Buffer[]) => {
   const strictSourceToText = new Map<string, Set<string>>()
   const fallbackSourceToText = new Map<string, Set<string>>()
+  const sourceNames = new Map<string, string>()
   const addSourceText = (index: Map<string, Set<string>>, source: string, textId: string) => {
     const key = source.toLowerCase()
     const ids = index.get(key) ?? new Set<string>()
     ids.add(textId)
     index.set(key, ids)
+    if (!sourceNames.has(key)) sourceNames.set(key, source)
   }
   let mhyFiles = 0
   let cabFiles = 0
@@ -239,11 +241,10 @@ export const galGameLinksFromBlocks = (blocks: readonly Buffer[]) => {
             if (values[cursor] === 'dialogueKey') break
             if (values[cursor] !== 'externalVoiceKey' && values[cursor] !== 'voiceKey') continue
             const source = values[cursor + 1]
-            if (SOURCE.test(source)) {
-              const strict = STRICT_SOURCE.test(source) && STRICT_TEXT_ID.test(textId)
-              addSourceText(strict ? strictSourceToText : fallbackSourceToText, source, textId)
-              directPairs++
-            }
+            if (!SOURCE.test(source)) continue
+            const strict = STRICT_SOURCE.test(source) && STRICT_TEXT_ID.test(textId)
+            addSourceText(strict ? strictSourceToText : fallbackSourceToText, source, textId)
+            directPairs++
             break
           }
         }
@@ -269,5 +270,5 @@ export const galGameLinksFromBlocks = (blocks: readonly Buffer[]) => {
       ambiguous++
     }
   }
-  return { links, mhyFiles, cabFiles, directPairs, ambiguous, fallbackLinks }
+  return { links, sourceNames, mhyFiles, cabFiles, directPairs, ambiguous, fallbackLinks }
 }
