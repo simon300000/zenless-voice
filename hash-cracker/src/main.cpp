@@ -751,6 +751,15 @@ int main(int argc, char** argv) {
   std::unordered_map<std::string, std::vector<std::string>> foldersByCategory;
   for (const DialogueId& dialogue : dialogueIds) foldersByCategory.emplace(dialogue.category, foldersFor(dialogue.category));
 
+  // Candidate generators repeatedly use the same decimal forms. Keep these
+  // immutable so the hot crack loops do not allocate and format them again for
+  // every prefix, scene, language, and take.
+  std::vector<std::vector<std::string>> numberFormsCache(1000);
+  for (unsigned value = 1; value < numberFormsCache.size(); ++value) numberFormsCache[value] = numberForms(value);
+  const auto& formsFor = [&](unsigned value) -> const std::vector<std::string>& {
+    return numberFormsCache[value];
+  };
+
   std::atomic<std::size_t> next{0};
   std::mutex matchesMutex;
   std::vector<Match> matches;
@@ -813,7 +822,7 @@ int main(int argc, char** argv) {
           base = fold(base, prefix.speaker, true);
           base = fold(base, "_");
           for (const auto& [take, maxSubTake] : takeDictionary->second) {
-            for (const std::string& takeForm : numberForms(take)) {
+            for (const std::string& takeForm : formsFor(take)) {
               const std::uint64_t takeState = fold(base, takeForm);
               const std::uint64_t hash = fold(takeState, ".wem");
               if (language.targetHashes.find(hash) != language.targetHashes.end()) {
@@ -821,7 +830,7 @@ int main(int argc, char** argv) {
               }
               const std::uint64_t subState = fold(takeState, "_");
               for (unsigned subTake = 1; subTake <= maxSubTake; ++subTake) {
-                for (const std::string& subForm : numberForms(subTake)) {
+                for (const std::string& subForm : formsFor(subTake)) {
                   const std::uint64_t subHash = fold(fold(subState, subForm), ".wem");
                   if (language.targetHashes.find(subHash) != language.targetHashes.end()) local.push_back(Match{subHash, prefix.speaker, prefix.path + scene + '_' + prefix.speaker + '_' + takeForm + '_' + subForm, ""});
                 }
@@ -905,19 +914,38 @@ int main(int argc, char** argv) {
   auto patternWorker = [&] {
     std::vector<Match> local;
     const auto matchSource = [&](const std::string& source, const std::string& speaker) {
-      const std::string filename = source + ".wem";
       for (const Language& language : languages) {
-        const std::uint64_t hash = fold(language.baseState, filename, true);
+        const std::uint64_t hash = fold(fold(language.baseState, source, true), ".wem");
         if (language.targetHashes.find(hash) != language.targetHashes.end()) local.push_back(Match{hash, speaker, source, ""});
       }
     };
     const auto emitTakes = [&](const std::string& stem, const std::string& speaker, unsigned maxTake, unsigned maxSubTake) {
+      struct StemState {
+        const Language* language;
+        std::uint64_t state;
+      };
+      std::vector<StemState> stemStates;
+      stemStates.reserve(languages.size());
+      for (const Language& language : languages) {
+        stemStates.push_back(StemState{&language, fold(fold(language.baseState, stem, true), "_")});
+      }
       for (unsigned take = 1; take <= maxTake; ++take) {
-        for (const std::string& takeForm : numberForms(take)) {
-          const std::string source = stem + '_' + takeForm;
-          matchSource(source, speaker);
-          for (unsigned subTake = 1; subTake <= maxSubTake; ++subTake) {
-            for (const std::string& subForm : numberForms(subTake)) matchSource(source + '_' + subForm, speaker);
+        for (const std::string& takeForm : formsFor(take)) {
+          for (const StemState& stemState : stemStates) {
+            const std::uint64_t takeState = fold(stemState.state, takeForm);
+            const std::uint64_t hash = fold(takeState, ".wem");
+            if (stemState.language->targetHashes.find(hash) != stemState.language->targetHashes.end()) {
+              local.push_back(Match{hash, speaker, stem + '_' + takeForm, ""});
+            }
+            const std::uint64_t subTakeState = fold(takeState, "_");
+            for (unsigned subTake = 1; subTake <= maxSubTake; ++subTake) {
+              for (const std::string& subForm : formsFor(subTake)) {
+                const std::uint64_t hash = fold(fold(subTakeState, subForm), ".wem");
+                if (stemState.language->targetHashes.find(hash) != stemState.language->targetHashes.end()) {
+                  local.push_back(Match{hash, speaker, stem + '_' + takeForm + '_' + subForm, ""});
+                }
+              }
+            }
           }
         }
       }
