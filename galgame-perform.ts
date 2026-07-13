@@ -205,11 +205,20 @@ const utf16AsciiStrings = (data: Uint8Array) => {
   return values
 }
 
-const SOURCE = /^GalGame_[A-Za-z0-9_-]+$/
-const TEXT_ID = /^[A-Za-z0-9_]+_GalGame_[A-Za-z0-9_-]+_\d+_\d+$/
+const SOURCE = /^GalGame_[A-Za-z0-9_-]+$/i
+const STRICT_SOURCE = /^GalGame_[A-Za-z0-9_-]+$/
+const STRICT_TEXT_ID = /^[A-Za-z0-9_]+_GalGame_[A-Za-z0-9_-]+_\d+_\d+$/
+const DIALOGUE_KEY = /^[A-Za-z0-9_-]+$/
 
 export const galGameLinksFromBlocks = (blocks: readonly Buffer[]) => {
-  const sourceToText = new Map<string, Set<string>>()
+  const strictSourceToText = new Map<string, Set<string>>()
+  const fallbackSourceToText = new Map<string, Set<string>>()
+  const addSourceText = (index: Map<string, Set<string>>, source: string, textId: string) => {
+    const key = source.toLowerCase()
+    const ids = index.get(key) ?? new Set<string>()
+    ids.add(textId)
+    index.set(key, ids)
+  }
   let mhyFiles = 0
   let cabFiles = 0
   let directPairs = 0
@@ -224,16 +233,15 @@ export const galGameLinksFromBlocks = (blocks: readonly Buffer[]) => {
         cabFiles++
         const values = utf16AsciiStrings(cab)
         for (let index = 0; index + 1 < values.length; index++) {
-          if (values[index] !== 'dialogueKey' || !TEXT_ID.test(values[index + 1])) continue
+          if (values[index] !== 'dialogueKey' || !DIALOGUE_KEY.test(values[index + 1])) continue
           const textId = values[index + 1]
           for (let cursor = index + 2; cursor < Math.min(index + 12, values.length - 1); cursor++) {
             if (values[cursor] === 'dialogueKey') break
             if (values[cursor] !== 'externalVoiceKey' && values[cursor] !== 'voiceKey') continue
             const source = values[cursor + 1]
             if (SOURCE.test(source)) {
-              const ids = sourceToText.get(source.toLowerCase()) ?? new Set<string>()
-              ids.add(textId)
-              sourceToText.set(source.toLowerCase(), ids)
+              const strict = STRICT_SOURCE.test(source) && STRICT_TEXT_ID.test(textId)
+              addSourceText(strict ? strictSourceToText : fallbackSourceToText, source, textId)
               directPairs++
             }
             break
@@ -245,9 +253,21 @@ export const galGameLinksFromBlocks = (blocks: readonly Buffer[]) => {
   }
   const links = new Map<string, string>()
   let ambiguous = 0
-  for (const [source, ids] of sourceToText) {
-    if (ids.size === 1) links.set(source, [...ids][0])
-    else ambiguous++
+  let fallbackLinks = 0
+  const sources = new Set([...strictSourceToText.keys(), ...fallbackSourceToText.keys()])
+  for (const source of sources) {
+    const strict = strictSourceToText.get(source)
+    const fallback = fallbackSourceToText.get(source)
+    if (strict?.size === 1) {
+      links.set(source, [...strict][0])
+    } else if (strict) {
+      ambiguous++
+    } else if (fallback?.size === 1) {
+      links.set(source, [...fallback][0])
+      fallbackLinks++
+    } else {
+      ambiguous++
+    }
   }
-  return { links, mhyFiles, cabFiles, directPairs, ambiguous }
+  return { links, mhyFiles, cabFiles, directPairs, ambiguous, fallbackLinks }
 }

@@ -23,3 +23,8 @@ the number of hardware threads reported by the operating system.
 
 `VOICE_RESULT_PATH` changes the input directory containing `wav/` and `wem/`.
 The default is `result/`.
+
+When `StreamingAssets/GalGamePerform/manifest.json` is available, `npm run
+crack` also extracts the official GalScript `voiceKey` values and adds them to
+the filename dictionary automatically. `VOICE_GALGAME_PERFORM_PATH` changes
+that resource directory.

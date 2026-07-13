@@ -67,6 +67,19 @@ struct DialogueId {
 struct SourceCandidate {
   std::string source;
   std::string speaker;
+  std::string category;
+};
+
+struct LocalScene {
+  std::string category;
+  std::string stem;
+  std::string contentId;
+  unsigned maxTake = 0;
+};
+
+struct NumberedStem {
+  std::string stem;
+  unsigned maxTake = 0;
 };
 
 struct RawPrefix {
@@ -349,6 +362,23 @@ bool looksLikeVoiceSource(std::string_view value) {
   return categoryNames.find(first) != categoryNames.end() || first == "NPC" || first == "MainCity" || first == "Timeline";
 }
 
+std::string categoryForSource(std::string_view source) {
+  const std::size_t slash = source.find_last_of('/');
+  const std::string leaf = lower(std::string(slash == std::string_view::npos ? source : source.substr(slash + 1)));
+  if (leaf.rfind("galgame_", 0) == 0) return "VO_Galgame";
+  if (leaf.rfind("comic_", 0) == 0) return "VO_Comic";
+  if (leaf.rfind("chatplus_", 0) == 0) return "VO_ChatPlus";
+  if (leaf.rfind("timeline_", 0) == 0 || leaf.rfind("vo_cs", 0) == 0) return "VO_TL";
+  if (leaf.rfind("bubble", 0) == 0 || leaf.rfind("vo_npc_", 0) == 0) return "VO_Bubble";
+  if (leaf.rfind("cinema", 0) == 0 || leaf.rfind("ongoingcinema_", 0) == 0) return "VO_Cinema";
+  if (leaf.rfind("ongoinglevel_", 0) == 0 || leaf.rfind("level_", 0) == 0) return "VO_Level";
+  if (leaf.rfind("ongoing", 0) == 0) return "VO_Ongoing";
+  if (leaf.rfind("chessboard_", 0) == 0) return "VO_Chessboard";
+  if (leaf.rfind("accompany_", 0) == 0) return "VO_Accompany";
+  if (leaf.rfind("tips_", 0) == 0) return "VO_Tips";
+  return {};
+}
+
 void addAlias(std::unordered_map<std::string, std::string>& aliases, std::string value) {
   if (value.rfind("VO_", 0) == 0) value.erase(0, 3);
   if (!isIdentifier(value) || categoryToken(value)) return;
@@ -608,6 +638,10 @@ int main(int argc, char** argv) {
   std::unordered_set<std::string> sourceCandidateStrings;
   std::vector<DialogueId> dialogueIds;
   std::unordered_set<std::string> dialogueKeys;
+  std::unordered_set<std::string> namingTextKeys;
+  std::unordered_map<std::string, unsigned> chatSceneTakes;
+  std::unordered_map<std::string, unsigned> timelineStemTakes;
+  std::unordered_set<std::string> comicAssetNames;
   std::unordered_map<std::string, std::string> legacySceneNames;
   std::unordered_map<std::string, std::unordered_map<unsigned, unsigned>> legacySceneTakes;
   const auto addLegacyScene = [&](const std::string& scene, const std::vector<std::string>& parts) {
@@ -635,7 +669,25 @@ int main(int argc, char** argv) {
       scanJsonStrings(readFile(entry.path()), [&](const std::string& value, bool key) {
         if (!key) return;
         if (auto parsed = parseDialogueId(value); parsed && dialogueKeys.insert(parsed->textId).second) dialogueIds.push_back(std::move(*parsed));
+        if (!namingTextKeys.insert(value).second) return;
         const std::vector<std::string> parts = split(value, '_');
+        if (parts.size() >= 5 && parts[1] == "Chat" && isDigits(parts[parts.size() - 2]) && isDigits(parts.back())) {
+          std::string family;
+          for (std::size_t index = 2; index + 2 < parts.size(); ++index) {
+            if (!family.empty()) family += '_';
+            family += parts[index];
+          }
+          const std::string key = "ChatPlus_" + family + '\t' + parts[parts.size() - 2];
+          chatSceneTakes[key]++;
+        }
+        if (value.rfind("TL_", 0) == 0 && parts.size() >= 3 && isDigits(parts.back())) {
+          const std::size_t suffix = value.rfind('_');
+          if (suffix != std::string::npos && suffix > 3) {
+            const std::string remainder = value.substr(3, suffix - 3);
+            timelineStemTakes["Timeline_" + remainder]++;
+            timelineStemTakes["Vo_" + remainder]++;
+          }
+        }
         if (parts.size() >= 3 && parts.front() == "GalGame") {
           std::size_t end = 1;
           while (end < parts.size() && !isDigits(parts[end]) && parts[end].find_first_of("0123456789") == std::string::npos) ++end;
@@ -665,6 +717,15 @@ int main(int argc, char** argv) {
       mineAvatarAliases(value, avatarAliases);
       if (value.rfind("VO_", 0) == 0 && !value.empty() && value.back() == '/') prefixStrings.insert(value);
       if (looksLikeVoiceSource(value)) sourceCandidateStrings.insert(value);
+      const std::string normalized = lower(value);
+      const std::string comicMarker = "data/scriptconfig/comic/";
+      const std::size_t comic = normalized.find(comicMarker);
+      if (comic != std::string::npos && normalized.size() > comic + comicMarker.size() + 6 && normalized.substr(normalized.size() - 6) == ".asset") {
+        const std::size_t start = comic + comicMarker.size();
+        const std::size_t slash = value.find_last_of("/\\");
+        if (slash == std::string::npos || slash < start) comicAssetNames.insert(value.substr(start, value.size() - start - 6));
+        else comicAssetNames.insert(value.substr(slash + 1, value.size() - slash - 7));
+      }
     });
   }
   logTiming("scan game data", dataScanStart);
@@ -681,13 +742,37 @@ int main(int argc, char** argv) {
   }
 
   std::vector<SourceCandidate> sourceCandidates;
-  sourceCandidates.reserve(sourceCandidateStrings.size());
+  sourceCandidates.reserve(sourceCandidateStrings.size() + 40000);
+  std::unordered_set<std::string> sourceCandidateKeys;
   const auto voidBlocks = readNumberArray(readFile(dataRoot / "Data" / "_unsorted" / "VoiceData.json"), "voidBlocks");
   for (const std::string& source : sourceCandidateStrings) {
     const std::size_t slash = source.find_last_of('/');
     const std::string_view leaf = slash == std::string::npos ? std::string_view(source) : std::string_view(source).substr(slash + 1);
-    if (slash == std::string::npos && voidBlocks.find(fnv32(leaf)) == voidBlocks.end()) continue;
-    sourceCandidates.push_back(SourceCandidate{source, ""});
+    const std::string category = categoryForSource(source);
+    const bool verifiedVoidBlock = slash == std::string::npos && voidBlocks.find(fnv32(leaf)) != voidBlocks.end();
+    if (slash == std::string::npos && category.empty() && !verifiedVoidBlock) continue;
+    if (sourceCandidateKeys.insert(lower(source)).second) {
+      sourceCandidates.push_back(SourceCandidate{source, "", verifiedVoidBlock ? "" : category});
+    }
+  }
+
+  std::size_t galScriptSourceCount = 0;
+  const char* galScriptEnvironment = std::getenv("VOICE_GALSCRIPT_DICTIONARY");
+  const fs::path galScriptPath = galScriptEnvironment && *galScriptEnvironment
+    ? fs::path(galScriptEnvironment)
+    : resultRoot / "galgame-perform-links.tsv";
+  {
+    std::ifstream input(galScriptPath);
+    std::string line;
+    while (std::getline(input, line)) {
+      if (line.empty() || line[0] == '#') continue;
+      const std::size_t tab = line.find('\t');
+      const std::string source = line.substr(0, tab);
+      if (lower(source).rfind("galgame_", 0) != 0) continue;
+      if (!sourceCandidateKeys.insert(lower(source)).second) continue;
+      sourceCandidates.push_back(SourceCandidate{source, "", "VO_Galgame"});
+      galScriptSourceCount++;
+    }
   }
 
   std::vector<RawPrefix> rawPrefixes;
@@ -745,7 +830,7 @@ int main(int argc, char** argv) {
 
   std::cerr << targetHashes.size() << " target hashes across " << languages.size() << " languages, " << aliases.size() << " game aliases, "
             << dialogueIds.size() << " dialogue IDs, " << sourceCandidates.size() << " direct sources, "
-            << patternKeywords.size() << " author pattern groups, " << prefixes.size() << " candidate prefixes, "
+            << galScriptSourceCount << " GalScript dictionary sources, " << patternKeywords.size() << " author pattern groups, " << prefixes.size() << " candidate prefixes, "
             << threadCount << " threads\n";
 
   std::unordered_map<std::string, std::vector<std::string>> foldersByCategory;
@@ -866,7 +951,7 @@ int main(int argc, char** argv) {
           if (language.targetHashes.find(hash) != language.targetHashes.end()) local.push_back(Match{hash, candidate.speaker, candidate.source, candidate.source});
           continue;
         }
-        for (const auto& [_, hashedPrefixes] : language.prefixesByCategory) {
+        const auto tryPrefixes = [&](const std::vector<HashedPrefix>& hashedPrefixes) {
           for (const HashedPrefix& hashedPrefix : hashedPrefixes) {
             const Prefix& prefix = *hashedPrefix.prefix;
             if (!prefix.gameOwned) continue;
@@ -874,6 +959,12 @@ int main(int argc, char** argv) {
             if (language.targetHashes.find(hash) == language.targetHashes.end()) continue;
             local.push_back(Match{hash, candidate.speaker.empty() ? prefix.speaker : candidate.speaker, prefix.path + candidate.source, candidate.source});
           }
+        };
+        if (!candidate.category.empty()) {
+          const auto found = language.prefixesByCategory.find(candidate.category);
+          if (found != language.prefixesByCategory.end()) tryPrefixes(found->second);
+        } else {
+          for (const auto& [_, hashedPrefixes] : language.prefixesByCategory) tryPrefixes(hashedPrefixes);
         }
       }
     }
@@ -907,6 +998,50 @@ int main(int argc, char** argv) {
   }
   std::sort(cinemaContentIds.begin(), cinemaContentIds.end());
   cinemaContentIds.erase(std::unique(cinemaContentIds.begin(), cinemaContentIds.end()), cinemaContentIds.end());
+
+  std::unordered_map<std::string, LocalScene> localSceneMap;
+  for (const DialogueId& dialogue : dialogueIds) {
+    if (dialogue.category == "GalGame") continue;
+    const std::string key = dialogue.category + '\t' + dialogue.middle + '\t' + dialogue.contentId;
+    auto& scene = localSceneMap[key];
+    scene.category = dialogue.category;
+    scene.stem = dialogue.middle;
+    scene.contentId = dialogue.contentId;
+    scene.maxTake++;
+  }
+  std::unordered_map<std::string, std::vector<LocalScene>> localScenesByFolder;
+  for (const auto& [_, scene] : localSceneMap) {
+    LocalScene bounded = scene;
+    bounded.maxTake = std::min(300U, std::max(3U, bounded.maxTake));
+    for (const std::string& folder : foldersFor(scene.category)) localScenesByFolder[lower(folder)].push_back(bounded);
+  }
+
+  std::vector<LocalScene> chatScenes;
+  chatScenes.reserve(chatSceneTakes.size());
+  for (const auto& [key, count] : chatSceneTakes) {
+    const std::size_t tab = key.find('\t');
+    if (tab == std::string::npos) continue;
+    chatScenes.push_back(LocalScene{"Chat", key.substr(0, tab), key.substr(tab + 1), std::min(200U, std::max(3U, count))});
+  }
+  std::vector<NumberedStem> timelineStems;
+  timelineStems.reserve(timelineStemTakes.size());
+  for (const auto& [stem, count] : timelineStemTakes) timelineStems.push_back(NumberedStem{stem, std::min(100U, std::max(3U, count))});
+
+  std::unordered_set<std::string> comicSceneSet;
+  for (const std::string& asset : comicAssetNames) {
+    comicSceneSet.insert(asset);
+    if (asset.size() > 2 && (asset[0] == 'C' || asset[0] == 'c') && std::isdigit(static_cast<unsigned char>(asset[1]))) {
+      std::size_t end = 1;
+      while (end < asset.size() && std::isdigit(static_cast<unsigned char>(asset[end]))) ++end;
+      const unsigned chapter = static_cast<unsigned>(std::strtoul(asset.substr(1, end - 1).c_str(), nullptr, 10));
+      if (chapter <= 5) comicSceneSet.insert("Chapter" + std::to_string(chapter) + asset.substr(end));
+    }
+    const std::size_t marker = asset.find("00_");
+    if (marker != std::string::npos && marker > 0 && std::all_of(asset.begin(), asset.begin() + static_cast<std::ptrdiff_t>(marker), [](unsigned char ch) { return std::isalpha(ch) != 0; })) {
+      comicSceneSet.insert("Chapter" + asset.substr(0, marker) + asset.substr(marker + 2));
+    }
+  }
+  std::vector<std::string> comicScenes(comicSceneSet.begin(), comicSceneSet.end());
 
   const auto patternCrackStart = Clock::now();
   next.store(0, std::memory_order_relaxed);
@@ -968,11 +1103,21 @@ int main(int argc, char** argv) {
     std::vector<std::string> npcRoles = npcRoleBases;
     for (const std::string& base : npcRoleBases) for (const std::string& suffix : npcRoleSuffixes) npcRoles.push_back(base + suffix);
     for (const std::string& modifier : npcRolePrefixes) for (const std::string& base : npcRoleBases) npcRoles.push_back(modifier + base);
+    for (const std::string& modifier : npcRolePrefixes) for (const std::string& base : npcRoleBases) for (const std::string& suffix : npcRoleSuffixes) npcRoles.push_back(modifier + base + suffix);
+    for (const std::string& left : galCommon) for (const std::string& right : galCommon) if (lower(left) != lower(right)) npcRoles.push_back(left + right);
     while (true) {
       const std::size_t index = next.fetch_add(1, std::memory_order_relaxed);
       if (index >= rawPrefixes.size()) break;
       const RawPrefix& prefix = rawPrefixes[index];
       const std::string category = lower(prefix.category);
+
+      if (!prefix.speaker.empty()) {
+        const auto localScenes = localScenesByFolder.find(category);
+        if (localScenes != localScenesByFolder.end()) for (const LocalScene& scene : localScenes->second) {
+          emitTakes(prefix.path + scene.stem + '_' + prefix.speaker + '_' + scene.contentId, prefix.speaker, scene.maxTake, 0);
+          emitTakes(prefix.path + scene.stem + '_' + scene.contentId + '_' + prefix.speaker, prefix.speaker, scene.maxTake, 0);
+        }
+      }
 
       if (category == "vo_accompany" && !prefix.speaker.empty()) {
         for (const std::string& action : accompanyActions) emitTakes(prefix.path + "Accompany_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0);
@@ -1029,6 +1174,12 @@ int main(int argc, char** argv) {
         for (const std::string& leafSpeaker : leafSpeakers) for (const std::string& chapter : comicChapters) {
           emitTakes(prefix.path + "Comic_Chapter" + chapter + '_' + leafSpeaker, leafSpeaker, 200, genericFolder ? 3 : 10);
         }
+        for (const std::string& leafSpeaker : leafSpeakers) for (const std::string& scene : comicScenes) {
+          emitTakes(prefix.path + "Comic_" + scene + '_' + leafSpeaker, leafSpeaker, 32, genericFolder ? 3 : 0);
+        }
+        for (const std::string& leafSpeaker : leafSpeakers) for (const std::string& scene : galSpecialScenes) for (unsigned section = 1; section <= 8; ++section) {
+          emitTakes(prefix.path + "Comic_" + scene + '_' + formsFor(section)[1] + '_' + leafSpeaker, leafSpeaker, 32, 0);
+        }
       } else if (category == "vo_chessboard" && !prefix.speaker.empty()) {
         emitTakes(prefix.path + "Chessboard_Limbo_CommonAvatar_" + prefix.speaker, prefix.speaker, 300, 3);
         for (const std::string& chapter : comicChapters) for (const std::string& rank : chessRanks) for (unsigned rankIndex = 1; rankIndex <= 4; ++rankIndex) {
@@ -1046,6 +1197,8 @@ int main(int argc, char** argv) {
         if (prefix.speaker.empty()) {
           for (unsigned film = 1; film <= 20; ++film) emitTakes(prefix.path + "VOID_CinemaFilm_" + std::to_string(film), "", 5, 0);
         } else {
+          emitTakes(prefix.path + "CinemaBreath_Cinema_" + prefix.speaker, prefix.speaker, 8, 0);
+          emitTakes(prefix.path + "Cinema_" + prefix.speaker, prefix.speaker, 8, 0);
           for (const std::string& contentId : cinemaContentIds) emitTakes(prefix.path + "CinemaBreath_Cinema_" + prefix.speaker + '_' + contentId, prefix.speaker, 5, 0);
           for (const std::string& action : accompanyActions) {
             emitTakes(prefix.path + "Cinema_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0);
@@ -1068,6 +1221,14 @@ int main(int argc, char** argv) {
           matchSource(prefix.path + "Bubble_" + prefix.speaker + '_' + action, prefix.speaker);
           emitTakes(prefix.path + "Bubble_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0);
         }
+      } else if (category == "vo_chatplus" && !prefix.speaker.empty()) {
+        for (const LocalScene& scene : chatScenes) {
+          emitTakes(prefix.path + scene.stem + '_' + prefix.speaker + '_' + scene.contentId, prefix.speaker, scene.maxTake, 0);
+        }
+      } else if (category == "vo_tl" && !prefix.speaker.empty()) {
+        for (const NumberedStem& stem : timelineStems) {
+          emitTakes(prefix.path + stem.stem + '_' + prefix.speaker, prefix.speaker, stem.maxTake, 0);
+        }
       } else if (category == "vo_message" && !prefix.speaker.empty()) {
         emitTakes(prefix.path + "Message_SayHello_" + prefix.speaker, prefix.speaker, 3, 0);
         emitTakes(prefix.path + "Message_" + prefix.speaker, prefix.speaker, 3, 0);
@@ -1086,7 +1247,9 @@ int main(int argc, char** argv) {
     const std::string leftSource = lower(left.source);
     const std::string rightSource = lower(right.source);
     if (leftSource != rightSource) return leftSource < rightSource;
-    return left.sourceKey < right.sourceKey;
+    if (left.source != right.source) return left.source < right.source;
+    if (left.sourceKey != right.sourceKey) return left.sourceKey < right.sourceKey;
+    return left.speaker < right.speaker;
   });
   std::vector<Match> mergedMatches;
   mergedMatches.reserve(matches.size());

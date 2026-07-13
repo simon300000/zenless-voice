@@ -233,7 +233,7 @@ try {
       officialGalGameSources.add(key)
     }
   }
-  console.log(`${extracted.mhyFiles} mhy1 bundles / ${extracted.cabFiles} CAB files scanned; ${extracted.directPairs} direct GalScript pairs found${extracted.ambiguous ? `; ${extracted.ambiguous} ambiguous rejected during extraction` : ''}`)
+  console.log(`${extracted.mhyFiles} mhy1 bundles / ${extracted.cabFiles} CAB files scanned; ${extracted.directPairs} direct GalScript pairs found; ${extracted.fallbackLinks} legacy-format fallback links accepted${extracted.ambiguous ? `; ${extracted.ambiguous} ambiguous rejected during extraction` : ''}`)
 } catch (error) {
   console.log(`GalGame Perform resources unavailable: ${error instanceof Error ? error.message : error}`)
 }

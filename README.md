@@ -7,11 +7,11 @@ Last update at `2026-07-13`, game version `3.0.0`
 
 `360691` wavs
 
-`101984` without speaker (28%)
+`83768` without speaker (23%)
 
-`171554` without transcription (48%)
+`113634` without transcription (32%)
 
-`83705` without inGameFilename (23%)
+`65489` without inGameFilename (18%)
 <!-- STATS_END -->
 
 ## Usage
