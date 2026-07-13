@@ -7,6 +7,6 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["index.ts", "update.ts"],
+  "include": ["index.ts", "update.ts", "download.ts"],
   "exclude": ["node_modules"]
 }

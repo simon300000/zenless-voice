@@ -1,9 +1,11 @@
 {
   "scripts": {
-    "build": "npm run build:extractor-tools && npm run build:hash-cracker && npx tsc -b hoyo-voice-extractor/tsconfig.json tsconfig.json",
+    "build": "npm run build:hoyodown && npm run build:extractor-tools && npm run build:hash-cracker && npx tsc -b hoyo-voice-extractor/tsconfig.json tsconfig.json",
+    "build:hoyodown": "node scripts/build-hoyodown.mjs",
     "build:extractor-tools": "node scripts/build-extractor-tools.mjs",
     "build:hash-cracker": "node hash-cracker/build.mjs",
     "watch": "npx tsc -b -w hoyo-voice-extractor/tsconfig.json tsconfig.json",
+    "download": "node download.js",
     "export": "node index.js",
     "cutscene": "node cutscene.js",
     "crack": "node hash-cracker/run.mjs",

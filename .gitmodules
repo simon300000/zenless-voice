@@ -4,3 +4,6 @@
 [submodule "hoyo-voice-extractor"]
 	path = hoyo-voice-extractor
 	url = https://github.com/simon300000/hoyo-voice-extractor.git
+[submodule "HoyoDown"]
+	path = HoyoDown
+	url = https://github.com/simon300000/HoyoDown.git

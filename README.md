@@ -20,11 +20,15 @@ Last update at `2026-07-12`, game version `3.0.0`
 git submodule update --init --recursive
 npm install
 npm run build
+npm run download
 npm run export
 npm run update
 ```
 
-`index.ts` reads PCK archives from `StreamingAssets/Audio/Windows/Full` by default. Use `VOICE_SOURCE_PATH` or `VOICE_RESULT_PATH` to override those paths.
+`npm run download` reads the game version from the latest `ZenlessData` commit message, lets HoyoDown select the reachable region automatically, then downloads the Chinese, English, Japanese, and Korean voice packages into `StreamingAssets`. The download is several gigabytes per language and requires the official CDN to be reachable.
+Use `npm run download -- --dry-run` to resolve the four manifests without writing files.
+
+`index.ts` recursively reads PCK archives from `StreamingAssets` by default. Use `VOICE_SOURCE_PATH` or `VOICE_RESULT_PATH` to override those paths.
 
 ZenlessData uses obfuscated config fields, so `update.ts` matches only event-to-audio paths that are unambiguous in both the game config and extracted Wwise banks. Unmatched rows are intentionally retained with blank annotations.
 
