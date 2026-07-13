@@ -264,8 +264,12 @@ const wavs = await findWAV(WAV_PATH)
 const voiceMap: Record<string, Voice> = {}
 const keysByHex = new Map<string, string[]>()
 const languageOfPath = (key: string) => {
-  const root = key.split('/')[0].toLowerCase()
-  return LANGUAGE_CONFIG.find(config => config.roots.includes(root))?.name ?? ''
+  for (const part of key.split('/')) {
+    const root = part.toLowerCase()
+    const config = LANGUAGE_CONFIG.find(config => config.roots.includes(root))
+    if (config) return config.name
+  }
+  return ''
 }
 for (const filename of wavs) {
   const key = relative(WAV_PATH, filename).split(sep).join('/')

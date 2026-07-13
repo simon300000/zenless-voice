@@ -82,6 +82,9 @@ struct Match {
   std::string sourceKey;
 };
 
+using LanguageTokensByRoot = std::unordered_map<std::string, std::unordered_map<std::string, std::unordered_set<std::string>>>;
+using TargetHashesByRoot = std::unordered_map<std::string, std::unordered_map<std::string, std::unordered_set<std::uint64_t>>>;
+
 std::string lower(std::string value) {
   for (char& ch : value) {
     if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch + ('a' - 'A'));
@@ -162,11 +165,34 @@ bool looksLikeLanguageToken(std::string_view value) {
     && std::all_of(value.begin() + static_cast<std::ptrdiff_t>(open + 1), value.begin() + static_cast<std::ptrdiff_t>(close), [](unsigned char ch) { return std::isalpha(ch) != 0; });
 }
 
-void collectLanguageTokens(const fs::path& root, std::unordered_map<std::string, std::unordered_set<std::string>>& tokensByRoot) {
+std::optional<std::string> findLanguageToken(const fs::path& file, const fs::path& root) {
+  std::optional<std::string> found;
+  for (fs::path current = file.parent_path(); current != root; current = current.parent_path()) {
+    const std::string token = lower(current.filename().string());
+    if (!looksLikeLanguageToken(token)) continue;
+    if (found && *found != token) return std::nullopt;
+    found = token;
+  }
+  return found;
+}
+
+bool isLanguageRoot(std::string_view value) {
+  return value == "cn" || value == "en" || value == "jp" || value == "kr";
+}
+
+std::optional<std::string> findLanguageRoot(const fs::path& file, const fs::path& root) {
+  for (fs::path current = file.parent_path(); current != root; current = current.parent_path()) {
+    const std::string name = lower(current.filename().string());
+    if (isLanguageRoot(name)) return name;
+  }
+  return std::nullopt;
+}
+
+void collectLanguageTokens(const fs::path& root, LanguageTokensByRoot& tokensByRoot) {
   if (!fs::is_directory(root)) return;
   const auto scanRoot = [&](const fs::path& languageRoot) {
     const std::string rootName = lower(languageRoot.filename().string());
-    auto& tokens = tokensByRoot[rootName];
+    auto& tokensByLanguageRoot = tokensByRoot[rootName];
     for (const auto& entry : fs::recursive_directory_iterator(languageRoot, fs::directory_options::skip_permission_denied)) {
       if (!entry.is_regular_file()) continue;
       const std::string filename = entry.path().filename().string();
@@ -177,9 +203,9 @@ void collectLanguageTokens(const fs::path& root, std::unordered_map<std::string,
       // Walk only the directory components below <root>/<language>. This is
       // equivalent to the old relative()+split() logic without allocating a
       // relative path and vector for every audio file.
-      for (fs::path current = entry.path().parent_path(); current != languageRoot; current = current.parent_path()) {
-        const std::string token = current.filename().string();
-        if (looksLikeLanguageToken(token)) tokens.insert(lower(token));
+      if (const auto token = findLanguageToken(entry.path(), languageRoot)) {
+        const std::string languageRootName = findLanguageRoot(entry.path(), languageRoot).value_or("");
+        tokensByLanguageRoot[languageRootName].insert(*token);
       }
     }
   };
@@ -245,19 +271,19 @@ std::optional<std::uint64_t> parseHex(std::string_view value) {
 std::size_t collectTargetHashes(
   const fs::path& wavRoot,
   std::unordered_set<std::uint64_t>& targetHashes,
-  std::unordered_map<std::string, std::unordered_set<std::uint64_t>>& targetHashesByRoot
+  TargetHashesByRoot& targetHashesByRoot,
+  const LanguageTokensByRoot& languageTokensByRoot
 ) {
   if (!fs::is_directory(wavRoot)) return 0;
 
-  // WAV output is partitioned as <language>/<...>/<16-hex>.wav. Scanning one
-  // language directory at a time means we already know the bucket and do not
-  // need fs::relative(), split(), extension(), or stem() for every file.
+  // WAV output is partitioned as <game-root>/.../<language>/<16-hex>.wav.
+  // Keep hashes separated by both game root and language because one game root
+  // can contain all four voice locales.
   targetHashes.reserve(300000);
   targetHashesByRoot.reserve(8);
   std::size_t scannedFiles = 0;
   std::size_t hashedFiles = 0;
   const auto scanRoot = [&](const fs::path& root, const std::string& rootName) {
-    auto& hashes = targetHashesByRoot[rootName];
     for (const auto& entry : fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied)) {
       if (!entry.is_regular_file()) continue;
       ++scannedFiles;
@@ -267,8 +293,21 @@ std::size_t collectTargetHashes(
           || (filename[18] != 'a' && filename[18] != 'A')
           || (filename[19] != 'v' && filename[19] != 'V')) continue;
       if (const auto hash = parseHex(std::string_view(filename).substr(0, 16))) {
+        const auto languageToken = findLanguageToken(entry.path(), root);
+        const auto languageRoot = findLanguageRoot(entry.path(), root);
+        const auto rootTokens = languageTokensByRoot.find(rootName);
+        if (rootTokens == languageTokensByRoot.end()) continue;
+        const auto resolveToken = [&](const std::string& languageRootName) -> std::optional<std::string> {
+          const auto candidates = rootTokens->second.find(languageRootName);
+          if (candidates == rootTokens->second.end() || candidates->second.size() != 1) return std::nullopt;
+          return *candidates->second.begin();
+        };
+        const auto resolvedToken = languageToken
+          ? languageToken
+          : languageRoot ? resolveToken(*languageRoot) : resolveToken("");
+        if (!resolvedToken) continue;
         targetHashes.insert(*hash);
-        hashes.insert(*hash);
+        targetHashesByRoot[rootName][*resolvedToken].insert(*hash);
         ++hashedFiles;
       }
       if (scannedFiles % 100000 == 0) {
@@ -547,10 +586,16 @@ int main(int argc, char** argv) {
       : std::thread::hardware_concurrency();
   const unsigned threadCount = std::max(1U, requestedThreads);
 
+  LanguageTokensByRoot languageTokensByRoot;
+  const auto languageStart = Clock::now();
+  collectLanguageTokens(wavRoot, languageTokensByRoot);
+  collectLanguageTokens(resultRoot / "wem", languageTokensByRoot);
+  logTiming("scan language tokens", languageStart);
+
   std::unordered_set<std::uint64_t> targetHashes;
-  std::unordered_map<std::string, std::unordered_set<std::uint64_t>> targetHashesByRoot;
+  TargetHashesByRoot targetHashesByRoot;
   const auto targetHashStart = Clock::now();
-  const std::size_t scannedWavFiles = collectTargetHashes(wavRoot, targetHashes, targetHashesByRoot);
+  const std::size_t scannedWavFiles = collectTargetHashes(wavRoot, targetHashes, targetHashesByRoot, languageTokensByRoot);
   logTiming("read target hashes (" + std::to_string(scannedWavFiles) + " WAV files)", targetHashStart);
   if (targetHashes.empty()) {
     std::cerr << "No 16-hex WAV filenames found under " << wavRoot << '\n';
@@ -674,34 +719,29 @@ int main(int argc, char** argv) {
     for (const auto& [key, scene] : legacySceneNames) if (seen.insert(key).second) legacyGalGameScenes.push_back(scene);
   }
 
-  std::unordered_map<std::string, std::unordered_set<std::string>> languageTokensByRoot;
-  const auto languageStart = Clock::now();
-  collectLanguageTokens(wavRoot, languageTokensByRoot);
-  collectLanguageTokens(resultRoot / "wem", languageTokensByRoot);
-  logTiming("scan language tokens", languageStart);
   std::vector<Language> languages;
-  for (const auto& [root, tokens] : languageTokensByRoot) {
-    const auto targets = targetHashesByRoot.find(root);
-    if (targets == targetHashesByRoot.end() || targets->second.empty()) continue;
-    if (tokens.size() != 1) {
-      std::cerr << "Skipping " << root << ": expected one language token, found " << tokens.size() << '\n';
-      continue;
+  for (const auto& [root, tokens] : targetHashesByRoot) {
+    for (const auto& [token, tokenTargets] : tokens) {
+      if (tokenTargets.empty()) continue;
+      Language language;
+      language.root = root;
+      language.token = token;
+      // The stored hash is equivalent to FNV-1 of <language>/Ex/<source>.wem.
+      // Prefixing the source path with the already-folded <language>/ex/ state
+      // avoids the old Chinese-only opaque constant and keeps all locales exact.
+      language.baseState = fold(fnvOffset, language.token + "/ex/", true);
+      language.targetHashes = tokenTargets;
+      for (const Prefix& prefix : prefixes) {
+        const std::uint64_t state = fold(language.baseState, prefix.path, true);
+        language.prefixesByCategory[prefix.category].push_back(HashedPrefix{&prefix, state});
+      }
+      languages.push_back(std::move(language));
     }
-    Language language;
-    language.root = root;
-    language.token = *tokens.begin();
-    // The stored hash is equivalent to FNV-1 of <language>/Ex/<source>.wem.
-    // Prefixing the source path with the already-folded <language>/ex/ state
-    // avoids the old Chinese-only opaque constant and keeps all locales exact.
-    language.baseState = fold(fnvOffset, language.token + "/ex/", true);
-    language.targetHashes = targets->second;
-    for (const Prefix& prefix : prefixes) {
-      const std::uint64_t state = fold(language.baseState, prefix.path, true);
-      language.prefixesByCategory[prefix.category].push_back(HashedPrefix{&prefix, state});
-    }
-    languages.push_back(std::move(language));
   }
-  std::sort(languages.begin(), languages.end(), [](const Language& left, const Language& right) { return left.root < right.root; });
+  std::sort(languages.begin(), languages.end(), [](const Language& left, const Language& right) {
+    if (left.root != right.root) return left.root < right.root;
+    return left.token < right.token;
+  });
 
   std::cerr << targetHashes.size() << " target hashes across " << languages.size() << " languages, " << aliases.size() << " game aliases, "
             << dialogueIds.size() << " dialogue IDs, " << sourceCandidates.size() << " direct sources, "
