@@ -5,6 +5,7 @@ import { promisify } from 'util'
 
 import { fnv1 } from './hoyo-voice-extractor/fnvjs/src/index.js'
 import { copyReadme, findWAV, readJSON, updateStats } from './hoyo-voice-extractor/index.js'
+import { galGameLinksFromBlocks } from './galgame-perform.js'
 
 const RESULT_PATH = process.env.VOICE_RESULT_PATH || join(import.meta.dirname, 'result')
 const WAV_PATH = join(RESULT_PATH, 'wav')
@@ -21,6 +22,8 @@ const gameVersion = await (async () => {
 })()
 const HASH_MATCHES_PATH = join(import.meta.dirname, 'hash-matches.tsv')
 const EVENT_WAVS_PATH = join(import.meta.dirname, 'event-wavs.tsv')
+const GALGAME_PERFORM_PATH = process.env.VOICE_GALGAME_PERFORM_PATH || join(import.meta.dirname, 'StreamingAssets', 'GalGamePerform')
+const GALGAME_EVIDENCE_PATH = process.env.VOICE_GALGAME_EVIDENCE || join(RESULT_PATH, 'galgame-text-evidence.jsonl')
 
 const LANGUAGE_CONFIG: readonly { roots: readonly string[], name: string, maps: readonly string[] }[] = [
   { roots: ['cn'], name: 'Chinese', maps: ['TextMapTemplateTb.json', 'TextMapOverwriteTemplateTb.json'] },
@@ -53,13 +56,10 @@ const textMaps: Record<string, Record<string, string>> = {}
 for (const config of LANGUAGE_CONFIG) textMaps[config.name] = await readMap(config.maps)
 const textKeys = new Set(Object.values(textMaps).flatMap(map => Object.keys(map)))
 console.log(LANGUAGE_CONFIG.map(config => `${Object.keys(textMaps[config.name]).length} ${config.name}`).join(', ') + ' TextMap entries loaded')
-const cleanText = (value: string) => value.replace(/<[^>]+>/g, '').replace(/\\n/g, ' ').trim()
 
 const transcriptFor = (language: string, textId: string) => {
   const raw = textMaps[language]?.[textId]
-  if (typeof raw !== 'string') return ''
-  const text = cleanText(raw)
-  return text.length >= 2 && !/^\d+$/.test(text) ? text : ''
+  return typeof raw === 'string' ? raw : ''
 }
 
 const asArray = (value: unknown): string[] => Array.isArray(value) ? value.map(String) : value == null ? [] : [String(value)]
@@ -186,6 +186,83 @@ try {
   }
 } catch { /* npm run update invokes the cracker first; direct node use may omit it */ }
 console.log(`${crackedFilenames.size} unambiguous wav filenames loaded from the ZenlessData hash cracker${ambiguousCrackedHashes.size ? ` (${ambiguousCrackedHashes.size} ambiguous rejected)` : ''}`)
+
+// GalScript dialogue nodes directly pair the scene-wide dialogueKey with the
+// exact Wwise externalVoiceKey/voiceKey. This authoritative join avoids trying
+// to derive a global dialogue ordinal from each speaker's local filename
+// ordinal. Reviewed ASR evidence remains only as an optional fallback for
+// sources absent from the extracted Perform index. Localized text always comes
+// from the game TextMap, never from ASR output.
+const galGameSourcePattern = /(?:^|\/)GalGame_([A-Za-z0-9-]+)_([A-Za-z0-9]+)_(\d+)(?:_(\d+))?$/i
+const galGameTextPattern = /^(?:[A-Za-z0-9]+_)*GalGame_([A-Za-z0-9-]+)_(\d+)_(\d+)$/i
+const galGameSourceKey = (source: string) => basename(source).toLowerCase()
+const canonicalGalGameFamily = (family: string) => {
+  const numericChapter = /^chapter0*(\d+)$/i.exec(family)
+  return numericChapter ? `chapter${Number(numericChapter[1])}` : family.toLowerCase()
+}
+const compatibleGalGameEvidence = (source: string, textId: string) => {
+  const sourceMatch = galGameSourcePattern.exec(source)
+  const textMatch = galGameTextPattern.exec(textId)
+  if (!sourceMatch || !textMatch || canonicalGalGameFamily(sourceMatch[1]) !== canonicalGalGameFamily(textMatch[1])) return false
+  const sourceScene = String(Number(sourceMatch[3]))
+  const textScene = String(Number(textMatch[2]))
+  if (sourceMatch[3].length > 3) return sourceScene === textScene
+  return sourceScene === String(Number(textMatch[2].slice(-sourceMatch[3].length)))
+}
+const galGameSourceToText = new Map<string, string>()
+const officialGalGameSources = new Set<string>()
+const ambiguousOfficialGalGameSources = new Set<string>()
+console.log('Reading official GalScript voice-to-TextMap index...')
+try {
+  const manifest = JSON.parse(await readFile(join(GALGAME_PERFORM_PATH, 'manifest.json'), 'utf8')) as { blocks?: unknown }
+  if (!Array.isArray(manifest.blocks) || !manifest.blocks.every(block => typeof block === 'string')) throw new Error('invalid GalGame Perform manifest')
+  const extracted = galGameLinksFromBlocks(await Promise.all(manifest.blocks.map(block => readFile(join(GALGAME_PERFORM_PATH, block)))))
+  await writeFile(join(RESULT_PATH, 'galgame-perform-links.tsv'),
+    '# GalScript voiceKey/externalVoiceKey\tdialogueKey\n' +
+    [...extracted.links].sort(([left], [right]) => left.localeCompare(right)).map(([source, textId]) => `${source}\t${textId}\n`).join(''))
+  for (const [source, textId] of extracted.links) {
+    if (!textKeys.has(textId)) continue
+    const key = galGameSourceKey(source)
+    const previous = galGameSourceToText.get(key)
+    if (previous && previous !== textId) {
+      galGameSourceToText.delete(key)
+      officialGalGameSources.delete(key)
+      ambiguousOfficialGalGameSources.add(key)
+    } else if (!ambiguousOfficialGalGameSources.has(key)) {
+      galGameSourceToText.set(key, textId)
+      officialGalGameSources.add(key)
+    }
+  }
+  console.log(`${extracted.mhyFiles} mhy1 bundles / ${extracted.cabFiles} CAB files scanned; ${extracted.directPairs} direct GalScript pairs found${extracted.ambiguous ? `; ${extracted.ambiguous} ambiguous rejected during extraction` : ''}`)
+} catch (error) {
+  console.log(`GalGame Perform resources unavailable: ${error instanceof Error ? error.message : error}`)
+}
+console.log(`${officialGalGameSources.size} official GalScript links loaded${ambiguousOfficialGalGameSources.size ? `; ${ambiguousOfficialGalGameSources.size} ambiguous rejected` : ''}`)
+
+const reviewedGalGameSources = new Set<string>()
+const ambiguousReviewedGalGameSources = new Set<string>()
+console.log('Reading reviewed GalGame TextMap evidence...')
+try {
+  for (const row of (await readFile(GALGAME_EVIDENCE_PATH, 'utf8')).split('\n')) {
+    if (!row) continue
+    let evidence: { source?: unknown, textId?: unknown, accepted?: unknown }
+    try { evidence = JSON.parse(row) as typeof evidence } catch { continue }
+    if (evidence.accepted !== true || typeof evidence.source !== 'string' || typeof evidence.textId !== 'string') continue
+    if (!textKeys.has(evidence.textId) || !compatibleGalGameEvidence(evidence.source, evidence.textId)) continue
+    const source = galGameSourceKey(evidence.source)
+    if (officialGalGameSources.has(source) || ambiguousOfficialGalGameSources.has(source)) continue
+    const previous = galGameSourceToText.get(source)
+    if (previous && previous !== evidence.textId) {
+      galGameSourceToText.delete(source)
+      reviewedGalGameSources.delete(source)
+      ambiguousReviewedGalGameSources.add(source)
+    } else if (!ambiguousReviewedGalGameSources.has(source)) {
+      galGameSourceToText.set(source, evidence.textId)
+      reviewedGalGameSources.add(source)
+    }
+  }
+} catch { /* evidence is optional; the structural join remains disabled without it */ }
+console.log(`${reviewedGalGameSources.size} reviewed fallback links loaded${ambiguousReviewedGalGameSources.size ? `; ${ambiguousReviewedGalGameSources.size} ambiguous rejected` : ''}`)
 
 // Resolve a raw speaker token (already a display name, or an internal alias) to
 // its display name.  Never invents a name: an unmapped alias resolves to itself
@@ -346,7 +423,9 @@ for (const [key, voice] of Object.entries(voiceMap)) {
   // actually co-occurs with TextMap ids in a game config -> use those ids.
   const sourceInfo = cracked?.sourceKey ? sourceToText[cracked.sourceKey] : undefined
   const crackedText = sourceInfo ? sourceTranscript(sourceInfo, voice.language) : ''
-  const templateText = crackedText || undefined
+  const galGameTextId = sourcePath ? galGameSourceToText.get(galGameSourceKey(sourcePath)) : undefined
+  const galGameText = galGameTextId ? transcriptFor(voice.language, galGameTextId) : ''
+  const templateText = crackedText || galGameText || undefined
   const textCandidates = new Set<string>()
   if (hex && pckWavToText[hex]) textCandidates.add(String(pckWavToText[hex]))
   if (sourcePath) for (const id of textIdsOf(pathToText[sourcePath])) if (textKeys.has(id)) textCandidates.add(id)

@@ -7,6 +7,6 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["index.ts", "update.ts", "download.ts"],
+  "include": ["index.ts", "update.ts", "download.ts", "galgame-perform.ts"],
   "exclude": ["node_modules"]
 }

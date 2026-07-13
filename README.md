@@ -3,13 +3,13 @@
 Voice-line extraction and annotation pipeline for [Zenless Zone Zero](https://zenless.hoyoverse.com/).
 
 <!-- STATS -->
-Last update at `2026-07-12`, game version `3.0.0`
+Last update at `2026-07-13`, game version `3.0.0`
 
 `360691` wavs
 
 `101984` without speaker (28%)
 
-`298708` without transcription (83%)
+`171554` without transcription (48%)
 
 `83705` without inGameFilename (23%)
 <!-- STATS_END -->
@@ -31,6 +31,14 @@ Use `npm run download -- --dry-run` to resolve the four manifests without writin
 `index.ts` recursively reads PCK archives from `StreamingAssets` by default. Use `VOICE_SOURCE_PATH` or `VOICE_RESULT_PATH` to override those paths.
 
 ZenlessData uses obfuscated config fields, so `update.ts` matches only event-to-audio paths that are unambiguous in both the game config and extracted Wwise banks. Unmatched rows are intentionally retained with blank annotations.
+
+`npm run download` also asks HoyoDown for the official resource catalog and the
+small set of blocks containing GalGame Perform assets. During `npm run update`,
+TypeScript unpacks their `mhy1`/CAB data and directly pairs each GalScript
+node's `dialogueKey` with its exact `externalVoiceKey`/`voiceKey`; no
+per-speaker/local ordinal is treated as the scene-global TextMap ordinal.
+Use `npm run download -- --perform-only` to refresh only these resources without
+checking or downloading the four voice packages.
 
 ## Acknowledgements
 
