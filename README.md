@@ -1,9 +1,11 @@
 # Zenless Voice
 
-Voice-line extraction and annotation pipeline for [Zenless Zone Zero](https://zenless.hoyoverse.com/).
+Zenless Voice is a dataset of voice lines from the popular game [Zenless Zone Zero](https://zenless.hoyoverse.com/).
+
+Hugging Face 🤗  [Zenless-Voice](https://huggingface.co/datasets/simon3000/zenless-voice)
 
 <!-- STATS -->
-Last update at `2026-07-13`, game version `3.0.0`
+Last update at `2026-07-15`, game version `3.0.0`
 
 `360691` wavs
 
@@ -14,34 +16,50 @@ Last update at `2026-07-13`, game version `3.0.0`
 `65489` without inGameFilename (18%)
 <!-- STATS_END -->
 
-## Usage
+## Dataset Details
 
-```bash
-git submodule update --init --recursive
-npm install
-npm run build
-npm run download
-npm run export
-npm run update
-```
+### Dataset Description
 
-`npm run download` reads the game version from the latest `ZenlessData` commit message, lets HoyoDown select the reachable region automatically, then downloads the Chinese, English, Japanese, and Korean voice packages into `StreamingAssets`. The download is several gigabytes per language and requires the official CDN to be reachable.
-Use `npm run download -- --dry-run` to resolve the four manifests without writing files.
+The dataset contains voice lines from the game's characters in multiple languages, including Chinese, English, Japanese, and Korean.
 
-`index.ts` recursively reads PCK archives from `StreamingAssets` by default. Use `VOICE_SOURCE_PATH` or `VOICE_RESULT_PATH` to override those paths.
+The voice lines are spoken by the characters in the game and cover a wide range of topics, including greetings, combat, and story dialogue.
 
-ZenlessData uses obfuscated config fields, so `update.ts` matches only event-to-audio paths that are unambiguous in both the game config and extracted Wwise banks. Unmatched rows are intentionally retained with blank annotations.
+- **Language(s) (NLP):** Chinese, English, Japanese, Korean
 
-`npm run download` also asks HoyoDown for the official resource catalog and the
-small set of blocks containing GalGame Perform assets. During `npm run update`,
-TypeScript unpacks their `mhy1`/CAB data and directly pairs each GalScript
-node's `dialogueKey` with its exact `externalVoiceKey`/`voiceKey`; no
-per-speaker/local ordinal is treated as the scene-global TextMap ordinal.
-Use `npm run download -- --perform-only` to refresh only these resources without
-checking or downloading the four voice packages.
+## Dataset Creation
+
+### Source Data
+
+The data was obtained by unpacking the [Zenless Zone Zero](https://zenless.hoyoverse.com/) game.
+
+#### Data Collection and Processing
+
+Please refer to [Zenless-Voice](https://github.com/simon300000/zenless-voice) for more information on how the data was processed.
+
+#### Who are the source data producers?
+
+The source data producers are the developers of the game, HoYoverse.
+
+### Annotations
+
+The dataset contains official annotations from the game, including language, speaker name, and transcription.
+
+## Bias, Risks, and Limitations
+
+Annotations are incomplete. Some voice lines are missing speaker names and transcriptions.
+
+Annotations are not guaranteed to be completely accurate.
+
+Speakers and transcriptions may contain markups and placeholders, for example: `(My brother and I still have <color=#FFAF2C>something we need to do</color>, and to achieve that goal, we need to venture deep into the Hollows.)`
+
+### Recommendations
+
+Users should be made aware of the risks, biases and limitations of the dataset.
+
+## Licensing Information
+
+Copyright © COGNOSPHERE. All Rights Reserved.
 
 ## Acknowledgements
 
-Speaker, source-path, and transcription links are reconstructed from `ZenlessData` by the repository's hash cracker.
-
-Special thanks to Escartem for [**AnimeWwise**](https://github.com/Escartem/AnimeWwise) and its `nap.map` data. The project provided an important reference for researching and validating Zenless Zone Zero's Wwise source-path naming and filename-hash rules.
+Special thanks to Escartem for [**AnimeWwise**](https://github.com/Escartem/AnimeWwise) and its `nap.map` data, which helped research and validate Zenless Zone Zero's Wwise source-path naming and filename-hash rules.
