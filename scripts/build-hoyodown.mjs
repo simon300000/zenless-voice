@@ -3,7 +3,8 @@ import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const source = resolve(root, 'HoyoDown')
-const output = resolve(source, 'hoyodown')
+const executableName = process.platform === 'win32' ? 'hoyodown.exe' : 'hoyodown'
+const output = resolve(source, executableName)
 const result = spawnSync('go', ['build', '-o', output, './cmd/hoyodown'], {
   cwd: source,
   stdio: 'inherit'

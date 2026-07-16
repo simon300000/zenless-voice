@@ -7,7 +7,7 @@ import { galGameBlockNamesFromCatalog, galGamePerformAssetPaths, isGzip } from '
 
 const root = import.meta.dirname
 const dataPath = join(root, 'ZenlessData')
-const downloader = join(root, 'HoyoDown', 'hoyodown')
+const downloader = join(root, 'HoyoDown', process.platform === 'win32' ? 'hoyodown.exe' : 'hoyodown')
 const outputPath = join(root, 'StreamingAssets')
 const performOutputPath = process.env.VOICE_GALGAME_PERFORM_PATH || join(outputPath, 'GalGamePerform')
 const performTemplatePath = join(dataPath, 'FileCfg', 'PerformTemplateTb.json')
