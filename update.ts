@@ -14,7 +14,8 @@ const execFileAsync = promisify(execFile)
 
 const gameVersion = await (async () => {
   try {
-    const { stdout } = await execFileAsync('git', ['-C', DATA_PATH, 'log', '-1', '--format=%s'])
+    const safeDataPath = DATA_PATH.split(sep).join('/')
+    const { stdout } = await execFileAsync('git', ['-c', `safe.directory=${safeDataPath}`, '-C', DATA_PATH, 'log', '-1', '--format=%s'])
     return stdout.match(/(?:Win|REL)(\d+\.\d+\.\d+)/)?.[1] || ''
   } catch {
     return ''
@@ -159,7 +160,7 @@ const pckWavToPath: Record<string, string> = {}
 const pckWavToText: Record<string, string> = {}
 const bnkEventToWavs: Record<string, string[]> = {}
 try {
-  for (const row of (await readFile(EVENT_WAVS_PATH, 'utf8')).split('\n')) {
+  for (const row of (await readFile(EVENT_WAVS_PATH, 'utf8')).split(/\r?\n/)) {
     if (!row) continue
     const [event, wav] = row.split('\t')
     if (event && wav) (bnkEventToWavs[event] ??= []).push(wav)
@@ -176,7 +177,7 @@ const crackedFilenames = new Map<string, CrackedFilename>()
 const ambiguousCrackedHashes = new Set<string>()
 console.log('Reading hash-matches.tsv...')
 try {
-  const rows = (await readFile(HASH_MATCHES_PATH, 'utf8')).split('\n')
+  const rows = (await readFile(HASH_MATCHES_PATH, 'utf8')).split(/\r?\n/)
   for (const row of rows) {
     if (!row) continue
     const columns = row.split('\t')
@@ -262,7 +263,7 @@ const reviewedGalGameSources = new Set<string>()
 const ambiguousReviewedGalGameSources = new Set<string>()
 console.log('Reading reviewed GalGame TextMap evidence...')
 try {
-  for (const row of (await readFile(GALGAME_EVIDENCE_PATH, 'utf8')).split('\n')) {
+  for (const row of (await readFile(GALGAME_EVIDENCE_PATH, 'utf8')).split(/\r?\n/)) {
     if (!row) continue
     let evidence: { source?: unknown, textId?: unknown, accepted?: unknown }
     try { evidence = JSON.parse(row) as typeof evidence } catch { continue }

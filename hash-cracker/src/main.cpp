@@ -9,6 +9,7 @@
 #include <functional>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -490,104 +491,126 @@ std::size_t writeEventWavIndex(const fs::path& resultRoot, const fs::path& outpu
   const fs::path wavRoot = resultRoot / "wav";
   if (!fs::exists(wemRoot) || !fs::exists(wavRoot)) return 0;
 
-  std::unordered_map<std::uint32_t, HircObject> objects;
-  std::unordered_map<std::uint32_t, std::uint32_t> soundSources;
-  for (const auto& entry : fs::recursive_directory_iterator(wemRoot)) {
-    if (!entry.is_regular_file() || lower(entry.path().extension().string()) != ".bnk") continue;
-    const std::string data = readFile(entry.path());
-    for (std::size_t section = 0; section + 8 <= data.size();) {
-      const std::uint32_t size = readU32(data, section + 4);
-      const std::size_t body = section + 8;
-      if (body + size > data.size()) break;
-      if (data.compare(section, 4, "HIRC") == 0 && size >= 4) {
-        const std::uint32_t count = readU32(data, body);
-        std::size_t cursor = body + 4;
-        for (std::uint32_t index = 0; index < count && cursor + 5 <= body + size; ++index) {
-          const unsigned char type = static_cast<unsigned char>(data[cursor]);
-          const std::uint32_t objectSize = readU32(data, cursor + 1);
-          cursor += 5;
-          if (cursor + objectSize > body + size || objectSize < 4) break;
-          std::string objectBody = data.substr(cursor, objectSize);
-          const std::uint32_t id = readU32(objectBody, 0);
-          objects[id] = HircObject{type, std::move(objectBody)};
-          if (type == 2 && objectSize >= 13) soundSources[id] = readU32(objects[id].body, 9);
-          cursor += objectSize;
-        }
-      }
-      section = body + size;
+  const auto localizedScope = [](const fs::path& file, const fs::path& root) {
+    for (fs::path current = file.parent_path(); current != root && current.has_relative_path(); current = current.parent_path()) {
+      if (isLanguageRoot(lower(current.filename().string()))) return fs::relative(current, root).generic_string();
     }
-  }
-
-  std::unordered_map<std::uint32_t, std::set<std::uint32_t>> memo;
-  std::function<std::set<std::uint32_t>(std::uint32_t, std::set<std::uint32_t>)> resolve;
-  resolve = [&](std::uint32_t id, std::set<std::uint32_t> visiting) -> std::set<std::uint32_t> {
-    if (const auto cached = memo.find(id); cached != memo.end()) return cached->second;
-    if (!visiting.insert(id).second) return {};
-    const auto found = objects.find(id);
-    if (found == objects.end()) return {};
-    const HircObject& object = found->second;
-    std::set<std::uint32_t> sources;
-    if (object.type == 2) {
-      if (const auto source = soundSources.find(id); source != soundSources.end()) sources.insert(source->second);
-    } else if (object.type == 3) {
-      if (object.body.size() >= 10) sources = resolve(readU32(object.body, 6), visiting);
-    } else if (object.type == 4) {
-      if (object.body.size() >= 5) {
-        const unsigned count = static_cast<unsigned char>(object.body[4]);
-        if (count > 0 && count <= 100 && 5 + count * 4 <= object.body.size()) {
-          for (unsigned index = 0; index < count; ++index) {
-            const auto child = resolve(readU32(object.body, 5 + index * 4), visiting);
-            sources.insert(child.begin(), child.end());
-          }
-        }
-      }
-    } else {
-      std::vector<std::uint32_t> best;
-      for (std::size_t offset = 4; offset + 4 <= object.body.size(); ++offset) {
-        const std::uint32_t count = readU32(object.body, offset);
-        if (count < 1 || count > 400 || offset + 4 + count * 4 > object.body.size()) continue;
-        std::vector<std::uint32_t> children;
-        children.reserve(count);
-        bool valid = true;
-        for (std::uint32_t index = 0; index < count; ++index) {
-          const std::uint32_t child = readU32(object.body, offset + 4 + index * 4);
-          if (objects.find(child) == objects.end()) { valid = false; break; }
-          children.push_back(child);
-        }
-        if (valid && children.size() > best.size()) best = std::move(children);
-      }
-      for (const std::uint32_t childId : best) {
-        const auto child = resolve(childId, visiting);
-        sources.insert(child.begin(), child.end());
-      }
-    }
-    memo[id] = sources;
-    return sources;
+    return fs::relative(file.parent_path(), root).generic_string();
   };
 
-  std::unordered_map<std::string, std::string> wavById;
+  std::map<std::string, std::unordered_map<std::string, std::vector<std::string>>> wavsByScope;
   for (const auto& entry : fs::recursive_directory_iterator(wavRoot)) {
     if (!entry.is_regular_file() || lower(entry.path().extension().string()) != ".wav") continue;
     const std::string stem = entry.path().stem().string();
-    if (isDigits(stem)) wavById.emplace(stem, fs::relative(entry.path(), wavRoot).generic_string());
+    if (!isDigits(stem)) continue;
+    wavsByScope[localizedScope(entry.path(), wavRoot)][stem].push_back(fs::relative(entry.path(), wavRoot).generic_string());
+  }
+
+  std::map<std::string, std::vector<fs::path>> banksByScope;
+  for (const auto& entry : fs::recursive_directory_iterator(wemRoot)) {
+    if (!entry.is_regular_file() || lower(entry.path().extension().string()) != ".bnk") continue;
+    banksByScope[localizedScope(entry.path(), wemRoot)].push_back(entry.path());
+  }
+
+  // HIRC object and media ids are reused by localized and versioned banks.
+  // Resolve each bank's self-contained event graph separately, then find its
+  // media only inside the matching language scope. The former global maps let
+  // filesystem traversal order pick both an object version and one language.
+  std::set<std::pair<std::uint32_t, std::string>> rows;
+  std::set<std::uint32_t> eventIds;
+  for (auto& [scope, banks] : banksByScope) {
+    const auto scopedWavs = wavsByScope.find(scope);
+    if (scopedWavs == wavsByScope.end()) continue;
+    std::sort(banks.begin(), banks.end());
+    for (const fs::path& bank : banks) {
+      std::unordered_map<std::uint32_t, HircObject> objects;
+      std::unordered_map<std::uint32_t, std::uint32_t> soundSources;
+      const std::string data = readFile(bank);
+      for (std::size_t section = 0; section + 8 <= data.size();) {
+        const std::uint32_t size = readU32(data, section + 4);
+        const std::size_t body = section + 8;
+        if (body + size > data.size()) break;
+        if (data.compare(section, 4, "HIRC") == 0 && size >= 4) {
+          const std::uint32_t count = readU32(data, body);
+          std::size_t cursor = body + 4;
+          for (std::uint32_t index = 0; index < count && cursor + 5 <= body + size; ++index) {
+            const unsigned char type = static_cast<unsigned char>(data[cursor]);
+            const std::uint32_t objectSize = readU32(data, cursor + 1);
+            cursor += 5;
+            if (cursor + objectSize > body + size || objectSize < 4) break;
+            std::string objectBody = data.substr(cursor, objectSize);
+            const std::uint32_t id = readU32(objectBody, 0);
+            objects[id] = HircObject{type, std::move(objectBody)};
+            if (type == 2 && objectSize >= 13) soundSources[id] = readU32(objects[id].body, 9);
+            cursor += objectSize;
+          }
+        }
+        section = body + size;
+      }
+      std::unordered_map<std::uint32_t, std::set<std::uint32_t>> memo;
+      std::function<std::set<std::uint32_t>(std::uint32_t, std::set<std::uint32_t>)> resolve;
+      resolve = [&](std::uint32_t id, std::set<std::uint32_t> visiting) -> std::set<std::uint32_t> {
+        if (const auto cached = memo.find(id); cached != memo.end()) return cached->second;
+        if (!visiting.insert(id).second) return {};
+        const auto found = objects.find(id);
+        if (found == objects.end()) return {};
+        const HircObject& object = found->second;
+        std::set<std::uint32_t> sources;
+        if (object.type == 2) {
+          if (const auto source = soundSources.find(id); source != soundSources.end()) sources.insert(source->second);
+        } else if (object.type == 3) {
+          if (object.body.size() >= 10) sources = resolve(readU32(object.body, 6), visiting);
+        } else if (object.type == 4) {
+          if (object.body.size() >= 5) {
+            const unsigned count = static_cast<unsigned char>(object.body[4]);
+            if (count > 0 && count <= 100 && 5 + count * 4 <= object.body.size()) {
+              for (unsigned index = 0; index < count; ++index) {
+                const auto child = resolve(readU32(object.body, 5 + index * 4), visiting);
+                sources.insert(child.begin(), child.end());
+              }
+            }
+          }
+        } else {
+          std::vector<std::uint32_t> best;
+          for (std::size_t offset = 4; offset + 4 <= object.body.size(); ++offset) {
+            const std::uint32_t count = readU32(object.body, offset);
+            if (count < 1 || count > 400 || offset + 4 + count * 4 > object.body.size()) continue;
+            std::vector<std::uint32_t> children;
+            children.reserve(count);
+            bool valid = true;
+            for (std::uint32_t index = 0; index < count; ++index) {
+              const std::uint32_t child = readU32(object.body, offset + 4 + index * 4);
+              if (objects.find(child) == objects.end()) { valid = false; break; }
+              children.push_back(child);
+            }
+            if (valid && children.size() > best.size()) best = std::move(children);
+          }
+          for (const std::uint32_t childId : best) {
+            const auto child = resolve(childId, visiting);
+            sources.insert(child.begin(), child.end());
+          }
+        }
+        memo[id] = sources;
+        return sources;
+      };
+
+      for (const auto& [id, object] : objects) {
+        if (object.type != 4) continue;
+        for (const std::uint32_t source : resolve(id, {})) {
+          const auto wavs = scopedWavs->second.find(std::to_string(source));
+          if (wavs == scopedWavs->second.end()) continue;
+          for (const std::string& wav : wavs->second) rows.emplace(id, wav);
+          eventIds.insert(id);
+        }
+      }
+    }
   }
 
   if (!outputPath.parent_path().empty()) fs::create_directories(outputPath.parent_path());
-  std::ofstream output(outputPath);
+  std::ofstream output(outputPath, std::ios::binary);
   if (!output) return 0;
-  std::size_t eventCount = 0;
-  for (const auto& [id, object] : objects) {
-    if (object.type != 4) continue;
-    bool wrote = false;
-    for (const std::uint32_t source : resolve(id, {})) {
-      const auto wav = wavById.find(std::to_string(source));
-      if (wav == wavById.end()) continue;
-      output << id << '\t' << wav->second << '\n';
-      wrote = true;
-    }
-    if (wrote) eventCount++;
-  }
-  return eventCount;
+  for (const auto& [id, wav] : rows) output << id << '\t' << wav << '\n';
+  return eventIds.size();
 }
 
 void usage(const char* executable) {
@@ -1294,7 +1317,7 @@ int main(int argc, char** argv) {
 
   const auto outputStart = Clock::now();
   if (!outputPath.parent_path().empty()) fs::create_directories(outputPath.parent_path());
-  std::ofstream output(outputPath);
+  std::ofstream output(outputPath, std::ios::binary);
   if (!output) {
     std::cerr << "Cannot write " << outputPath << '\n';
     return 1;

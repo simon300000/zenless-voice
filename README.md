@@ -5,15 +5,15 @@ Zenless Voice is a dataset of voice lines from the popular game [Zenless Zone Ze
 Hugging Face 🤗  [Zenless-Voice](https://huggingface.co/datasets/simon3000/zenless-voice)
 
 <!-- STATS -->
-Last update at `2026-07-15`, game version `3.0.0`
+Last update at `2026-07-16`, game version `3.0.0`
 
 `360691` wavs
 
-`83768` without speaker (23%)
+`83759` without speaker (23%)
 
-`113270` without transcription (31%)
+`113302` without transcription (31%)
 
-`65489` without inGameFilename (18%)
+`7020` without inGameFilename (2%)
 <!-- STATS_END -->
 
 ## Dataset Details
