@@ -1,1 +1,6 @@
 *.pck
+*.blk
+
+*_version
+
+manifest.json
