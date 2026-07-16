@@ -110,19 +110,29 @@ const addEventText = (event: string, ids: string[]) => {
     : []
   eventToText[event] = { textID: [...new Set([...previousIds, ...ids])] }
 }
-const indexConfigRows = (value: Json): void => {
-  if (Array.isArray(value)) return value.forEach(indexConfigRows)
+const indexConfigRows = (value: Json, nonTranscriptSourceFields: ReadonlySet<string> = new Set()): void => {
+  if (Array.isArray(value)) return value.forEach(entry => indexConfigRows(entry, nonTranscriptSourceFields))
   if (!value || typeof value !== 'object') return
-  const strings = Object.values(value).filter((entry): entry is string => typeof entry === 'string')
+  const entries = Object.entries(value).filter(([field]) => !nonTranscriptSourceFields.has(field))
+  const strings = entries.map(([, entry]) => entry).filter((entry): entry is string => typeof entry === 'string')
   const sources = strings.filter(source => sourcePattern.test(source) && !source.endsWith('/'))
   const ids = strings.filter(id => textKeys.has(id))
   if (sources.length && ids.length) for (const source of sources) addSourceInfo(source, ids)
   const events = strings.filter(name => /(Play|Stop|Set|Post)_V[Oo]/.test(name))
   if (events.length && ids.length) for (const event of events) addEventText(eventHash32(event), ids)
   for (const event of events) eventToVoiceType[eventHash32(event)] = /(?:Play|Stop|Set|Post)_V[Oo](?:_External)?_([A-Za-z0-9]+)/.exec(event)?.[1] ?? ''
-  Object.values(value).forEach(indexConfigRows)
+  entries.forEach(([, entry]) => indexConfigRows(entry, nonTranscriptSourceFields))
 }
-for (const table of sourceTables) indexConfigRows(await readJSON<Json>(join(DATA_PATH, 'FileCfg', table)))
+// Tips rows can pair a spoken source with optional reaction/effort sources. Only
+// the primary source speaks the row's TextMap line; auxiliary sources are short
+// non-verbal clips and must not inherit that transcription.
+const nonTranscriptSourceFieldsByTable: Record<string, ReadonlySet<string>> = {
+  'TipsConfigTemplateTb.json': new Set(['CGMNACEDDCC']),
+  'OngoingTipsConfigTemplateTb.json': new Set(['AGFNGIEPKMF'])
+}
+for (const table of sourceTables) {
+  indexConfigRows(await readJSON<Json>(join(DATA_PATH, 'FileCfg', table)), nonTranscriptSourceFieldsByTable[table])
+}
 
 const audioResource = await readJSON<{ tagedEvents?: number[], tags?: string[] }>(join(DATA_PATH, 'Data', 'JsonBytes', 'Audio', 'AudioResourceData.json'))
 const voiceData = await readJSON<{ allPrefixes?: unknown }>(join(DATA_PATH, 'Data', '_unsorted', 'VoiceData.json'))
