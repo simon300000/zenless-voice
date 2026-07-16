@@ -21,7 +21,7 @@ foreach(config Debug Release RelWithDebInfo MinSizeRel)
 endforeach()
 
 if(MSVC)
-  target_compile_options(zenless-hash-cracker PRIVATE /W4)
+  target_compile_options(zenless-hash-cracker PRIVATE /W4 /O2)
 else()
   target_compile_options(zenless-hash-cracker PRIVATE -Wall -Wextra -Wpedantic -O3)
 endif()
