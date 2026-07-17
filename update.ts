@@ -578,10 +578,12 @@ for (const [key, voice] of Object.entries(voiceMap)) {
     : cracked ? resolveSpeaker(cracked.speaker) : sourcePath ? (resolveSpeaker(pathToSpeaker[sourcePath]) || speakerFromPath(sourcePath)) : ''
   const speaker = pathSpeaker || (eventSpeakers.size === 1 ? [...eventSpeakers][0] : '')
 
-  // --- readable in-game identifier: source path if known, else event name(s)/hash(es) ---
-  const inGameFilename = sourcePath
-    ?? [...events].map(event => eventNameByHash.get(event)).find(Boolean)
-    ?? (events.size ? [...events].sort().join('|') : '')
+  // A source path is a Wwise external-source leaf. Store the complete FNV-1
+  // preimage, including its localized root and .wem suffix, so callers can
+  // hash this field directly and recover the WAV id. Event-only matches do
+  // not prove a filename and therefore must not populate this field.
+  const token = languageToken.get(voice.language)
+  const inGameFilename = sourcePath && token ? `${token}/ex/${sourcePath}.wem` : ''
   const voiceType = (sourcePath ? voiceTypeFromPath(sourcePath) : '')
     || voiceTypeFromName(inGameFilename)
     || ([...events].map(event => eventToVoiceType[event]).find(Boolean) ?? '')
