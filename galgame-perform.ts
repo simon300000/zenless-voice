@@ -205,6 +205,76 @@ const utf16AsciiStrings = (data: Uint8Array) => {
   return values
 }
 
+export type MhyUtf16StringLocation = {
+  sourceBlock: string
+  mhyFileIndex: number
+  cabFileIndex: number
+  valueIndex: number
+}
+
+export type MhyCabLocation = {
+  sourceBlock: string
+  mhyFileIndex: number
+  cabFileIndex: number
+}
+
+/** Visit each decoded CAB payload without assigning any asset semantics. */
+export const visitMhyCabFiles = (
+  blocks: readonly { sourceBlock: string, data: Buffer }[],
+  visit: (data: Buffer, location: MhyCabLocation) => void
+) => {
+  let mhyFiles = 0
+  let cabFiles = 0
+  for (const block of blocks) {
+    let offset = 0
+    while (offset + 8 <= block.data.length) {
+      while (offset < block.data.length && block.data[offset] === 0) offset++
+      if (offset + 8 > block.data.length) break
+      const unpacked = unpackMhyFile(block.data, offset)
+      const mhyFileIndex = mhyFiles++
+      for (const cab of unpacked.files) {
+        visit(cab, { sourceBlock: block.sourceBlock, mhyFileIndex, cabFileIndex: cabFiles++ })
+      }
+      offset = unpacked.end
+    }
+  }
+  return { mhyFiles, cabFiles }
+}
+
+/** Visit every framed UTF-16 ASCII value in local mhy1 CAB payloads.
+ *
+ * This exposes the already-audited container decoder without assigning any
+ * dialogue semantics.  Callers remain responsible for native hash and asset
+ * membership validation.
+ */
+export const visitMhyUtf16AsciiStrings = (
+  blocks: readonly { sourceBlock: string, data: Buffer }[],
+  visit: (value: string, location: MhyUtf16StringLocation) => void
+) => {
+  let mhyFiles = 0
+  let cabFiles = 0
+  let stringValues = 0
+  for (const block of blocks) {
+    let offset = 0
+    while (offset + 8 <= block.data.length) {
+      while (offset < block.data.length && block.data[offset] === 0) offset++
+      if (offset + 8 > block.data.length) break
+      const unpacked = unpackMhyFile(block.data, offset)
+      const mhyFileIndex = mhyFiles++
+      for (const cab of unpacked.files) {
+        const cabFileIndex = cabFiles++
+        const values = utf16AsciiStrings(cab)
+        for (let valueIndex = 0; valueIndex < values.length; valueIndex++) {
+          visit(values[valueIndex], { sourceBlock: block.sourceBlock, mhyFileIndex, cabFileIndex, valueIndex })
+          stringValues++
+        }
+      }
+      offset = unpacked.end
+    }
+  }
+  return { mhyFiles, cabFiles, stringValues }
+}
+
 const SOURCE = /^(?:VO_Galgame\/(?:[A-Za-z0-9_.-]+\/)*VO_[A-Za-z0-9]+\/)?GalGame_[A-Za-z0-9_-]+$/i
 const STRICT_SOURCE = /^GalGame_[A-Za-z0-9_-]+$/
 const STRICT_TEXT_ID = /^[A-Za-z0-9_]+_GalGame_[A-Za-z0-9_-]+_\d+_\d+$/

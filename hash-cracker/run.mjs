@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -11,7 +11,9 @@ const resultRoot = isAbsolute(resultRootValue) ? resultRootValue : resolve(resul
 const performRootValue = process.env.VOICE_GALGAME_PERFORM_PATH || join(repository, 'StreamingAssets', 'GalGamePerform')
 const performRoot = isAbsolute(performRootValue) ? performRootValue : resolve(performRootValue)
 const dictionaryPath = join(resultRoot, 'galgame-perform-links.tsv')
+const dictionaryTemporaryPath = `${dictionaryPath}.tmp`
 const environment = { ...process.env }
+delete environment.VOICE_GALSCRIPT_DICTIONARY
 
 try {
   const { galGameLinksFromBlocks } = await import('../galgame-perform.js')
@@ -19,12 +21,14 @@ try {
   if (!Array.isArray(manifest.blocks) || !manifest.blocks.every(block => typeof block === 'string')) throw new Error('invalid manifest')
   const extracted = galGameLinksFromBlocks(await Promise.all(manifest.blocks.map(block => readFile(join(performRoot, block)))))
   await mkdir(resultRoot, { recursive: true })
-  await writeFile(dictionaryPath,
+  await writeFile(dictionaryTemporaryPath,
     '# GalScript voiceKey/externalVoiceKey\tdialogueKey\n' +
     [...extracted.links].sort(([left], [right]) => left.localeCompare(right)).map(([source, textId]) => `${extracted.sourceNames.get(source) ?? source}\t${textId}\n`).join(''))
+  await rename(dictionaryTemporaryPath, dictionaryPath)
   environment.VOICE_GALSCRIPT_DICTIONARY = dictionaryPath
   console.log(`Loaded ${extracted.links.size} game-owned GalScript voice keys for filename cracking`)
 } catch (error) {
+  await rm(dictionaryTemporaryPath, { force: true }).catch(() => {})
   console.log(`GalScript filename dictionary unavailable: ${error instanceof Error ? error.message : error}`)
 }
 

@@ -17,9 +17,15 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -90,12 +96,53 @@ struct RawPrefix {
   std::string speaker;
 };
 
+enum MatchEvidence : std::uint32_t {
+  GameSource = 1U << 0,
+  TextMapDialogue = 1U << 1,
+  TextMapLegacy = 1U << 2,
+  TextMapLocalScene = 1U << 3,
+  TextMapChat = 1U << 4,
+  TextMapTimeline = 1U << 5,
+  ComicAsset = 1U << 6,
+  AuthorTsv = 1U << 7,
+  HardcodedPattern = 1U << 8,
+  SpeakerConflict = 1U << 9,
+  SourceKeyConflict = 1U << 10
+};
+
+constexpr std::uint32_t gameEvidenceMask = GameSource | TextMapDialogue | TextMapLegacy
+  | TextMapLocalScene | TextMapChat | TextMapTimeline | ComicAsset;
+
 struct Match {
   std::uint64_t hash = 0;
   std::string speaker;
   std::string source;
   std::string sourceKey;
+  std::uint32_t evidence = 0;
 };
+
+std::string evidenceText(std::uint32_t evidence) {
+  const std::pair<std::uint32_t, const char*> labels[] = {
+    {GameSource, "game-source"},
+    {TextMapDialogue, "textmap-dialogue"},
+    {TextMapLegacy, "textmap-legacy"},
+    {TextMapLocalScene, "textmap-local-scene"},
+    {TextMapChat, "textmap-chat"},
+    {TextMapTimeline, "textmap-timeline"},
+    {ComicAsset, "comic-asset"},
+    {AuthorTsv, "author-tsv"},
+    {HardcodedPattern, "hardcoded-pattern"},
+    {SpeakerConflict, "speaker-conflict"},
+    {SourceKeyConflict, "sourcekey-conflict"}
+  };
+  std::string result;
+  for (const auto& [flag, label] : labels) {
+    if ((evidence & flag) == 0) continue;
+    if (!result.empty()) result += ',';
+    result += label;
+  }
+  return result;
+}
 
 using LanguageTokensByRoot = std::unordered_map<std::string, std::unordered_map<std::string, std::unordered_set<std::string>>>;
 using TargetHashesByRoot = std::unordered_map<std::string, std::unordered_map<std::string, std::unordered_set<std::uint64_t>>>;
@@ -158,6 +205,12 @@ bool isDigits(std::string_view value) {
 bool isIdentifier(std::string_view value) {
   if (value.size() < 2 || value.size() > 63 || isDigits(value)) return false;
   return std::all_of(value.begin(), value.end(), [](unsigned char ch) { return std::isalnum(ch) != 0; });
+}
+
+bool isSpeakerIdentifier(std::string_view value) {
+  if (value.size() < 2 || value.size() > 63 || isDigits(value)) return false;
+  if (value.front() == '_' || value.back() == '_') return false;
+  return std::all_of(value.begin(), value.end(), [](unsigned char ch) { return std::isalnum(ch) != 0 || ch == '_'; });
 }
 
 std::vector<std::string> split(std::string_view value, char delimiter) {
@@ -237,6 +290,16 @@ std::string readFile(const fs::path& path) {
   input.seekg(0);
   input.read(data.data(), static_cast<std::streamsize>(data.size()));
   return data;
+}
+
+bool replaceFile(const fs::path& temporary, const fs::path& destination) {
+#ifdef _WIN32
+  return MoveFileExW(temporary.c_str(), destination.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+  std::error_code error;
+  fs::rename(temporary, destination, error);
+  return !error;
+#endif
 }
 
 // A small streaming JSON string reader is enough here: the cracker needs game
@@ -345,7 +408,7 @@ std::string hexOf(std::uint64_t value) {
 
 const std::unordered_set<std::string> categoryNames = {
   "Accompany", "Activity", "Breath", "Bubble", "Chat", "ChatPlus", "Chessboard", "Cinema",
-  "Clue", "Comic", "Gal", "Galgame", "Level", "Maincity", "Maincity_NPC", "Maincity_ShopNpc",
+  "Clue", "Comic", "Gal", "GalGame", "Level", "Maincity", "Maincity_NPC", "Maincity_ShopNpc",
   "Message", "Ongoing", "OngoingAntique", "OngoingCinema", "OngoingLevel", "OngoingMainCity",
   "Tips", "TL", "VoiceOnly"
 };
@@ -437,16 +500,16 @@ std::vector<std::string> foldersFor(std::string_view category) {
 }
 
 std::optional<Prefix> parsePrefix(const std::string& path, bool gameOwned) {
-  if (path.rfind("VO_", 0) != 0 || path.back() != '/') return std::nullopt;
+  if (path.empty() || lower(path).rfind("vo_", 0) != 0 || path.back() != '/') return std::nullopt;
   const std::vector<std::string> parts = split(path, '/');
   std::string speaker;
   for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
-    if (it->rfind("VO_", 0) == 0 && *it != parts.front()) {
-      speaker = it->substr(3);
+    if (lower(*it).rfind("vo_", 0) == 0 && it != parts.rend() - 1) {
+      const std::string candidate = it->substr(3);
+      if (isSpeakerIdentifier(candidate)) speaker = candidate;
       break;
     }
   }
-  if (!isIdentifier(speaker)) return std::nullopt;
   return Prefix{path, parts.front(), speaker, gameOwned};
 }
 
@@ -486,10 +549,10 @@ struct HircObject {
   std::string body;
 };
 
-std::size_t writeEventWavIndex(const fs::path& resultRoot, const fs::path& outputPath) {
+std::optional<std::size_t> writeEventWavIndex(const fs::path& resultRoot, const fs::path& outputPath) {
   const fs::path wemRoot = resultRoot / "wem";
   const fs::path wavRoot = resultRoot / "wav";
-  if (!fs::exists(wemRoot) || !fs::exists(wavRoot)) return 0;
+  if (!fs::exists(wemRoot) || !fs::exists(wavRoot)) return std::nullopt;
 
   const auto localizedScope = [](const fs::path& file, const fs::path& root) {
     for (fs::path current = file.parent_path(); current != root && current.has_relative_path(); current = current.parent_path()) {
@@ -516,7 +579,7 @@ std::size_t writeEventWavIndex(const fs::path& resultRoot, const fs::path& outpu
   // Resolve each bank's self-contained event graph separately, then find its
   // media only inside the matching language scope. The former global maps let
   // filesystem traversal order pick both an object version and one language.
-  std::set<std::pair<std::uint32_t, std::string>> rows;
+  std::set<std::tuple<std::uint32_t, std::string, std::string>> rows;
   std::set<std::uint32_t> eventIds;
   for (auto& [scope, banks] : banksByScope) {
     const auto scopedWavs = wavsByScope.find(scope);
@@ -571,7 +634,13 @@ std::size_t writeEventWavIndex(const fs::path& resultRoot, const fs::path& outpu
             }
           }
         } else {
+          static const std::unordered_set<unsigned char> supportedContainers = {5, 6, 7, 9, 10, 11, 12, 13, 15};
+          if (supportedContainers.find(object.type) == supportedContainers.end()) {
+            memo[id] = sources;
+            return sources;
+          }
           std::vector<std::uint32_t> best;
+          bool ambiguousBest = false;
           for (std::size_t offset = 4; offset + 4 <= object.body.size(); ++offset) {
             const std::uint32_t count = readU32(object.body, offset);
             if (count < 1 || count > 400 || offset + 4 + count * 4 > object.body.size()) continue;
@@ -583,7 +652,17 @@ std::size_t writeEventWavIndex(const fs::path& resultRoot, const fs::path& outpu
               if (objects.find(child) == objects.end()) { valid = false; break; }
               children.push_back(child);
             }
-            if (valid && children.size() > best.size()) best = std::move(children);
+            if (!valid) continue;
+            if (children.size() > best.size()) {
+              best = std::move(children);
+              ambiguousBest = false;
+            } else if (children.size() == best.size() && children != best) {
+              ambiguousBest = true;
+            }
+          }
+          if (ambiguousBest) {
+            memo[id] = sources;
+            return sources;
           }
           for (const std::uint32_t childId : best) {
             const auto child = resolve(childId, visiting);
@@ -599,7 +678,7 @@ std::size_t writeEventWavIndex(const fs::path& resultRoot, const fs::path& outpu
         for (const std::uint32_t source : resolve(id, {})) {
           const auto wavs = scopedWavs->second.find(std::to_string(source));
           if (wavs == scopedWavs->second.end()) continue;
-          for (const std::string& wav : wavs->second) rows.emplace(id, wav);
+           for (const std::string& wav : wavs->second) rows.emplace(id, wav, bank.stem().string());
           eventIds.insert(id);
         }
       }
@@ -607,9 +686,17 @@ std::size_t writeEventWavIndex(const fs::path& resultRoot, const fs::path& outpu
   }
 
   if (!outputPath.parent_path().empty()) fs::create_directories(outputPath.parent_path());
-  std::ofstream output(outputPath, std::ios::binary);
-  if (!output) return 0;
-  for (const auto& [id, wav] : rows) output << id << '\t' << wav << '\n';
+  fs::path temporaryPath = outputPath;
+  temporaryPath += ".tmp";
+  std::ofstream output(temporaryPath, std::ios::binary);
+  if (!output) return std::nullopt;
+  for (const auto& [id, wav, bank] : rows) output << id << '\t' << wav << '\t' << bank << '\n';
+  output.close();
+  if (!output || !replaceFile(temporaryPath, outputPath)) {
+    std::error_code ignored;
+    fs::remove(temporaryPath, ignored);
+    return std::nullopt;
+  }
   return eventIds.size();
 }
 
@@ -731,6 +818,7 @@ int main(int argc, char** argv) {
   logTiming("read TextMap", textMapStart);
 
   const auto dataScanStart = Clock::now();
+  const auto voidBlocks = readNumberArray(readFile(dataRoot / "Data" / "_unsorted" / "VoiceData.json"), "voidBlocks");
   for (const auto& entry : fs::recursive_directory_iterator(dataRoot)) {
     if (!entry.is_regular_file() || lower(entry.path().extension().string()) != ".json") continue;
     const std::string relativePath = fs::relative(entry.path(), dataRoot).generic_string();
@@ -739,8 +827,9 @@ int main(int argc, char** argv) {
     scanJsonStrings(data, [&](const std::string& value, bool) {
       mineAliases(value, aliases);
       mineAvatarAliases(value, avatarAliases);
-      if (value.rfind("VO_", 0) == 0 && !value.empty() && value.back() == '/') prefixStrings.insert(value);
-      if (looksLikeVoiceSource(value)) sourceCandidateStrings.insert(value);
+      if (lower(value).rfind("vo_", 0) == 0 && !value.empty() && value.back() == '/') prefixStrings.insert(value);
+      const bool verifiedVoidBlock = value.find('/') == std::string::npos && voidBlocks.find(fnv32(value)) != voidBlocks.end();
+      if (looksLikeVoiceSource(value) || verifiedVoidBlock) sourceCandidateStrings.insert(value);
       const std::string normalized = lower(value);
       const std::string comicMarker = "data/scriptconfig/comic/";
       const std::size_t comic = normalized.find(comicMarker);
@@ -766,13 +855,12 @@ int main(int argc, char** argv) {
   }
   std::unordered_set<std::string> galGamePrefixSpeakers;
   for (const Prefix& prefix : prefixes) {
-    if (prefix.category == "VO_Galgame") galGamePrefixSpeakers.insert(lower(prefix.speaker));
+    if (lower(prefix.category) == "vo_galgame" && !prefix.speaker.empty()) galGamePrefixSpeakers.insert(lower(prefix.speaker));
   }
 
   std::vector<SourceCandidate> sourceCandidates;
   sourceCandidates.reserve(sourceCandidateStrings.size() + 40000);
   std::unordered_set<std::string> sourceCandidateKeys;
-  const auto voidBlocks = readNumberArray(readFile(dataRoot / "Data" / "_unsorted" / "VoiceData.json"), "voidBlocks");
   for (const std::string& source : sourceCandidateStrings) {
     const std::size_t slash = source.find_last_of('/');
     const std::string_view leaf = slash == std::string::npos ? std::string_view(source) : std::string_view(source).substr(slash + 1);
@@ -786,10 +874,8 @@ int main(int argc, char** argv) {
 
   std::size_t galScriptSourceCount = 0;
   const char* galScriptEnvironment = std::getenv("VOICE_GALSCRIPT_DICTIONARY");
-  const fs::path galScriptPath = galScriptEnvironment && *galScriptEnvironment
-    ? fs::path(galScriptEnvironment)
-    : resultRoot / "galgame-perform-links.tsv";
-  {
+  if (galScriptEnvironment && *galScriptEnvironment) {
+    const fs::path galScriptPath(galScriptEnvironment);
     std::ifstream input(galScriptPath);
     std::string line;
     while (std::getline(input, line)) {
@@ -818,7 +904,9 @@ int main(int argc, char** argv) {
   for (const std::string& path : prefixStrings) rawPrefixes.push_back(parseRawPrefix(path));
 
   std::unordered_map<std::string, std::vector<std::string>> patternKeywords;
-  {
+  const char* auditPatternEnvironment = std::getenv("VOICE_AUDIT_NON_GAME_PATTERNS");
+  const bool auditNonGamePatterns = auditPatternEnvironment && *auditPatternEnvironment == '1';
+  if (auditNonGamePatterns) {
     const fs::path patternPath = fs::absolute(dataRoot).parent_path() / "hash-cracker" / "author-patterns.tsv";
     std::ifstream input(patternPath);
     std::string line;
@@ -856,7 +944,7 @@ int main(int argc, char** argv) {
       language.targetHashes = tokenTargets;
       for (const Prefix& prefix : prefixes) {
         const std::uint64_t state = fold(language.baseState, prefix.path, true);
-        language.prefixesByCategory[prefix.category].push_back(HashedPrefix{&prefix, state});
+        language.prefixesByCategory[lower(prefix.category)].push_back(HashedPrefix{&prefix, state});
       }
       languages.push_back(std::move(language));
     }
@@ -896,13 +984,14 @@ int main(int argc, char** argv) {
       if (folders == foldersByCategory.end()) continue;
       for (const Language& language : languages) {
         for (const std::string& folder : folders->second) {
-          const auto found = language.prefixesByCategory.find(folder);
+          const auto found = language.prefixesByCategory.find(lower(folder));
           if (found == language.prefixesByCategory.end()) continue;
           for (const HashedPrefix& hashedPrefix : found->second) {
             const Prefix& prefix = *hashedPrefix.prefix;
+            if (prefix.speaker.empty()) continue;
             const std::string leaf = dialogue.middle + '_' + prefix.speaker + '_' + dialogue.contentId + '_' + dialogue.lineIndex + ".wem";
             const std::uint64_t hash = fold(hashedPrefix.state, leaf, true);
-            if (language.targetHashes.find(hash) != language.targetHashes.end()) local.push_back(Match{hash, prefix.speaker, prefix.path + leaf.substr(0, leaf.size() - 4), ""});
+            if (language.targetHashes.find(hash) != language.targetHashes.end()) local.push_back(Match{hash, prefix.speaker, prefix.path + leaf.substr(0, leaf.size() - 4), "", TextMapDialogue});
           }
         }
       }
@@ -935,11 +1024,11 @@ int main(int argc, char** argv) {
       const auto takeDictionary = legacySceneTakes.find(lower(scene));
       if (takeDictionary == legacySceneTakes.end()) continue;
       for (const Language& language : languages) {
-        const auto found = language.prefixesByCategory.find("VO_Galgame");
+        const auto found = language.prefixesByCategory.find("vo_galgame");
         if (found == language.prefixesByCategory.end()) continue;
         for (const HashedPrefix& hashedPrefix : found->second) {
           const Prefix& prefix = *hashedPrefix.prefix;
-          if (!prefix.gameOwned) continue;
+          if (!prefix.gameOwned || prefix.speaker.empty()) continue;
           std::uint64_t base = fold(hashedPrefix.state, scene, true);
           base = fold(base, "_");
           base = fold(base, prefix.speaker, true);
@@ -949,13 +1038,13 @@ int main(int argc, char** argv) {
               const std::uint64_t takeState = fold(base, takeForm);
               const std::uint64_t hash = fold(takeState, ".wem");
               if (language.targetHashes.find(hash) != language.targetHashes.end()) {
-                local.push_back(Match{hash, prefix.speaker, prefix.path + scene + '_' + prefix.speaker + '_' + takeForm, ""});
+                local.push_back(Match{hash, prefix.speaker, prefix.path + scene + '_' + prefix.speaker + '_' + takeForm, "", TextMapLegacy});
               }
               const std::uint64_t subState = fold(takeState, "_");
               for (unsigned subTake = 1; subTake <= maxSubTake; ++subTake) {
                 for (const std::string& subForm : formsFor(subTake)) {
                   const std::uint64_t subHash = fold(fold(subState, subForm), ".wem");
-                  if (language.targetHashes.find(subHash) != language.targetHashes.end()) local.push_back(Match{subHash, prefix.speaker, prefix.path + scene + '_' + prefix.speaker + '_' + takeForm + '_' + subForm, ""});
+                  if (language.targetHashes.find(subHash) != language.targetHashes.end()) local.push_back(Match{subHash, prefix.speaker, prefix.path + scene + '_' + prefix.speaker + '_' + takeForm + '_' + subForm, "", TextMapLegacy});
                 }
               }
             }
@@ -986,7 +1075,7 @@ int main(int argc, char** argv) {
       if (candidate.source.find('/') != std::string::npos) {
         for (const Language& language : languages) {
           const std::uint64_t hash = fold(language.baseState, filename, true);
-          if (language.targetHashes.find(hash) != language.targetHashes.end()) local.push_back(Match{hash, candidate.speaker, candidate.source, candidate.source});
+          if (language.targetHashes.find(hash) != language.targetHashes.end()) local.push_back(Match{hash, candidate.speaker, candidate.source, candidate.source, GameSource});
         }
         continue;
       }
@@ -1001,11 +1090,11 @@ int main(int argc, char** argv) {
               const std::uint64_t hash = fold(hashedPrefix.state, filename, true);
               if (language.targetHashes.find(hash) == language.targetHashes.end()) continue;
               candidateMatched = true;
-              local.push_back(Match{hash, candidate.speaker.empty() ? prefix.speaker : candidate.speaker, prefix.path + candidate.source, candidate.source});
+              local.push_back(Match{hash, candidate.speaker.empty() ? prefix.speaker : candidate.speaker, prefix.path + candidate.source, candidate.source, GameSource});
             }
           };
           if (!candidate.category.empty()) {
-            const auto found = language.prefixesByCategory.find(candidate.category);
+            const auto found = language.prefixesByCategory.find(lower(candidate.category));
             if (found != language.prefixesByCategory.end()) tryPrefixes(found->second);
           } else {
             for (const auto& [_, hashedPrefixes] : language.prefixesByCategory) tryPrefixes(hashedPrefixes);
@@ -1098,13 +1187,15 @@ int main(int argc, char** argv) {
   threads.clear();
   auto patternWorker = [&] {
     std::vector<Match> local;
-    const auto matchSource = [&](const std::string& source, const std::string& speaker) {
+    const auto matchSource = [&](const std::string& source, const std::string& speaker, std::uint32_t evidence = HardcodedPattern) {
+      if ((evidence & gameEvidenceMask) == 0 && !auditNonGamePatterns) return;
       for (const Language& language : languages) {
         const std::uint64_t hash = fold(fold(language.baseState, source, true), ".wem");
-        if (language.targetHashes.find(hash) != language.targetHashes.end()) local.push_back(Match{hash, speaker, source, ""});
+        if (language.targetHashes.find(hash) != language.targetHashes.end()) local.push_back(Match{hash, speaker, source, "", evidence});
       }
     };
-    const auto emitTakes = [&](const std::string& stem, const std::string& speaker, unsigned maxTake, unsigned maxSubTake) {
+    const auto emitTakes = [&](const std::string& stem, const std::string& speaker, unsigned maxTake, unsigned maxSubTake, std::uint32_t evidence = HardcodedPattern) {
+      if ((evidence & gameEvidenceMask) == 0 && !auditNonGamePatterns) return;
       struct StemState {
         const Language* language;
         std::uint64_t state;
@@ -1120,14 +1211,14 @@ int main(int argc, char** argv) {
             const std::uint64_t takeState = fold(stemState.state, takeForm);
             const std::uint64_t hash = fold(takeState, ".wem");
             if (stemState.language->targetHashes.find(hash) != stemState.language->targetHashes.end()) {
-              local.push_back(Match{hash, speaker, stem + '_' + takeForm, ""});
+              local.push_back(Match{hash, speaker, stem + '_' + takeForm, "", evidence});
             }
             const std::uint64_t subTakeState = fold(takeState, "_");
             for (unsigned subTake = 1; subTake <= maxSubTake; ++subTake) {
               for (const std::string& subForm : formsFor(subTake)) {
                 const std::uint64_t hash = fold(fold(subTakeState, subForm), ".wem");
                 if (stemState.language->targetHashes.find(hash) != stemState.language->targetHashes.end()) {
-                  local.push_back(Match{hash, speaker, stem + '_' + takeForm + '_' + subForm, ""});
+                  local.push_back(Match{hash, speaker, stem + '_' + takeForm + '_' + subForm, "", evidence});
                 }
               }
             }
@@ -1164,20 +1255,20 @@ int main(int argc, char** argv) {
       if (!prefix.speaker.empty()) {
         const auto localScenes = localScenesByFolder.find(category);
         if (localScenes != localScenesByFolder.end()) for (const LocalScene& scene : localScenes->second) {
-          emitTakes(prefix.path + scene.stem + '_' + prefix.speaker + '_' + scene.contentId, prefix.speaker, scene.maxTake, 0);
-          emitTakes(prefix.path + scene.stem + '_' + scene.contentId + '_' + prefix.speaker, prefix.speaker, scene.maxTake, 0);
+          emitTakes(prefix.path + scene.stem + '_' + prefix.speaker + '_' + scene.contentId, prefix.speaker, scene.maxTake, 0, TextMapLocalScene);
+          emitTakes(prefix.path + scene.stem + '_' + scene.contentId + '_' + prefix.speaker, prefix.speaker, scene.maxTake, 0, TextMapLocalScene);
         }
       }
 
       if (category == "vo_accompany" && !prefix.speaker.empty()) {
-        for (const std::string& action : accompanyActions) emitTakes(prefix.path + "Accompany_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0);
+        for (const std::string& action : accompanyActions) emitTakes(prefix.path + "Accompany_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0, AuthorTsv);
         for (unsigned content = 1; content <= 60; ++content) {
           const std::string contentId = std::string("521431") + (content < 10 ? "00" : content < 100 ? "0" : "") + std::to_string(content);
           emitTakes(prefix.path + "OngoingMainCityPartner_Partner" + prefix.speaker + '_' + prefix.speaker + '_' + contentId, prefix.speaker, 3, 0);
         }
       } else if (category == "vo_breath") {
         const auto emitBreath = [&](const std::string& speaker) {
-          for (const std::string& emotion : breathEmotions) emitTakes(prefix.path + "Breath_" + speaker + '_' + emotion, speaker, 3, 0);
+          for (const std::string& emotion : breathEmotions) emitTakes(prefix.path + "Breath_" + speaker + '_' + emotion, speaker, 3, 0, AuthorTsv);
         };
         if (prefix.speaker.empty()) {
           for (const std::string& speaker : allAliases) emitBreath(speaker);
@@ -1197,46 +1288,47 @@ int main(int argc, char** argv) {
           for (const std::string& family : galFamilies) {
             if (family == "Chapter") {
               for (const std::string& variant : {"", "1", "2", "3"}) {
-                emitTakes(prefix.path + "GalGame_Chapter" + scene + variant + '_' + prefix.speaker, prefix.speaker, 300, sameSpeaker ? 15 : 0);
+                emitTakes(prefix.path + "GalGame_Chapter" + scene + variant + '_' + prefix.speaker, prefix.speaker, 300, sameSpeaker ? 15 : 0, AuthorTsv);
               }
             } else {
-              emitTakes(prefix.path + "GalGame_" + family + scene + '_' + prefix.speaker, prefix.speaker, 600, sameSpeaker ? 35 : 0);
+              emitTakes(prefix.path + "GalGame_" + family + scene + '_' + prefix.speaker, prefix.speaker, 600, sameSpeaker ? 35 : 0, AuthorTsv);
             }
           }
         }
         for (const std::string& chapter : galNumberedChapters) {
-          emitTakes(prefix.path + "GalGame_Chapter" + chapter + '_' + prefix.speaker, prefix.speaker, 300, 10);
+          emitTakes(prefix.path + "GalGame_Chapter" + chapter + '_' + prefix.speaker, prefix.speaker, 300, 10, AuthorTsv);
           if (commonSpeaker) for (const std::string& role : npcRoles) {
-            emitTakes(prefix.path + "GalGame_Chapter" + chapter + '_' + role, role, 300, 10);
+            emitTakes(prefix.path + "GalGame_Chapter" + chapter + '_' + role, role, 300, 10, AuthorTsv);
           }
         }
         for (const std::string& scene : galSpecialScenes) {
-          emitTakes(prefix.path + "GalGame_" + scene + '_' + prefix.speaker, prefix.speaker, 300, 10);
+          emitTakes(prefix.path + "GalGame_" + scene + '_' + prefix.speaker, prefix.speaker, 300, 10, AuthorTsv);
         }
       } else if (category == "vo_comic" && !prefix.speaker.empty()) {
         const std::string folderSpeaker = lower(prefix.speaker);
         const bool genericFolder = folderSpeaker == "npc" || folderSpeaker == "subordinate" || folderSpeaker == "effect";
-        std::vector<std::string> leafSpeakers{prefix.speaker};
+        std::vector<std::pair<std::string, std::uint32_t>> leafSpeakers{{prefix.speaker, ComicAsset}};
         if (genericFolder) {
-          leafSpeakers = allAliases;
-          leafSpeakers.insert(leafSpeakers.end(), npcRoles.begin(), npcRoles.end());
+          leafSpeakers.clear();
+          for (const std::string& speaker : allAliases) leafSpeakers.emplace_back(speaker, ComicAsset);
+          for (const std::string& speaker : npcRoles) leafSpeakers.emplace_back(speaker, AuthorTsv);
         }
-        for (const std::string& leafSpeaker : leafSpeakers) for (const std::string& chapter : comicChapters) {
-          emitTakes(prefix.path + "Comic_Chapter" + chapter + '_' + leafSpeaker, leafSpeaker, 200, genericFolder ? 3 : 10);
+        for (const auto& [leafSpeaker, speakerEvidence] : leafSpeakers) for (const std::string& chapter : comicChapters) {
+          emitTakes(prefix.path + "Comic_Chapter" + chapter + '_' + leafSpeaker, leafSpeaker, 200, genericFolder ? 3 : 10, AuthorTsv);
         }
-        for (const std::string& leafSpeaker : leafSpeakers) for (const std::string& scene : comicScenes) {
-          emitTakes(prefix.path + "Comic_" + scene + '_' + leafSpeaker, leafSpeaker, 32, genericFolder ? 3 : 0);
+        for (const auto& [leafSpeaker, speakerEvidence] : leafSpeakers) for (const std::string& scene : comicScenes) {
+          emitTakes(prefix.path + "Comic_" + scene + '_' + leafSpeaker, leafSpeaker, 32, genericFolder ? 3 : 0, speakerEvidence);
         }
-        for (const std::string& leafSpeaker : leafSpeakers) for (const std::string& scene : galSpecialScenes) for (unsigned section = 1; section <= 8; ++section) {
-          emitTakes(prefix.path + "Comic_" + scene + '_' + formsFor(section)[1] + '_' + leafSpeaker, leafSpeaker, 32, 0);
+        for (const auto& [leafSpeaker, speakerEvidence] : leafSpeakers) for (const std::string& scene : galSpecialScenes) for (unsigned section = 1; section <= 8; ++section) {
+          emitTakes(prefix.path + "Comic_" + scene + '_' + formsFor(section)[1] + '_' + leafSpeaker, leafSpeaker, 32, 0, AuthorTsv);
         }
       } else if (category == "vo_chessboard" && !prefix.speaker.empty()) {
         emitTakes(prefix.path + "Chessboard_Limbo_CommonAvatar_" + prefix.speaker, prefix.speaker, 300, 3);
         for (const std::string& chapter : comicChapters) for (const std::string& rank : chessRanks) for (unsigned rankIndex = 1; rankIndex <= 4; ++rankIndex) {
-          emitTakes(prefix.path + "Chessboard_Chapter" + chapter + '_' + rank + std::to_string(rankIndex) + '_' + prefix.speaker, prefix.speaker, 100, 3);
+          emitTakes(prefix.path + "Chessboard_Chapter" + chapter + '_' + rank + std::to_string(rankIndex) + '_' + prefix.speaker, prefix.speaker, 100, 3, AuthorTsv);
           for (unsigned section = 1; section <= 5; ++section) {
-            emitTakes(prefix.path + "Chessboard_Chapter" + chapter + '_' + std::to_string(section) + '_' + rank + std::to_string(rankIndex) + '_' + prefix.speaker, prefix.speaker, 100, 3);
-            emitTakes(prefix.path + "Chessboard_Chapter" + chapter + '_' + rank + std::to_string(rankIndex) + '_' + std::to_string(section) + '_' + prefix.speaker, prefix.speaker, 100, 3);
+            emitTakes(prefix.path + "Chessboard_Chapter" + chapter + '_' + std::to_string(section) + '_' + rank + std::to_string(rankIndex) + '_' + prefix.speaker, prefix.speaker, 100, 3, AuthorTsv);
+            emitTakes(prefix.path + "Chessboard_Chapter" + chapter + '_' + rank + std::to_string(rankIndex) + '_' + std::to_string(section) + '_' + prefix.speaker, prefix.speaker, 100, 3, AuthorTsv);
           }
         }
         for (const std::string& companion : galGameSceneAliases) for (unsigned variant = 1; variant <= 3; ++variant) {
@@ -1251,8 +1343,8 @@ int main(int argc, char** argv) {
           emitTakes(prefix.path + "Cinema_" + prefix.speaker, prefix.speaker, 8, 0);
           for (const std::string& contentId : cinemaContentIds) emitTakes(prefix.path + "CinemaBreath_Cinema_" + prefix.speaker + '_' + contentId, prefix.speaker, 5, 0);
           for (const std::string& action : accompanyActions) {
-            emitTakes(prefix.path + "Cinema_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0);
-            emitTakes(prefix.path + "Cinema_NPC_MainCity_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0);
+            emitTakes(prefix.path + "Cinema_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0, AuthorTsv);
+            emitTakes(prefix.path + "Cinema_NPC_MainCity_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0, AuthorTsv);
           }
           for (unsigned scene = 1; scene <= 20; ++scene) for (unsigned breath = 1; breath <= 4; ++breath) {
             std::ostringstream breathName;
@@ -1263,21 +1355,21 @@ int main(int argc, char** argv) {
         }
       } else if (category == "vo_tips" && !prefix.speaker.empty()) {
         for (const std::string& action : tipsActions) {
-          matchSource(prefix.path + "Tips_" + prefix.speaker + '_' + action, prefix.speaker);
-          emitTakes(prefix.path + "Tips_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0);
+          matchSource(prefix.path + "Tips_" + prefix.speaker + '_' + action, prefix.speaker, AuthorTsv);
+          emitTakes(prefix.path + "Tips_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0, AuthorTsv);
         }
       } else if (category == "vo_bubble" && !prefix.speaker.empty()) {
         for (const std::string& action : bubbleActions) {
-          matchSource(prefix.path + "Bubble_" + prefix.speaker + '_' + action, prefix.speaker);
-          emitTakes(prefix.path + "Bubble_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0);
+          matchSource(prefix.path + "Bubble_" + prefix.speaker + '_' + action, prefix.speaker, AuthorTsv);
+          emitTakes(prefix.path + "Bubble_" + prefix.speaker + '_' + action, prefix.speaker, 3, 0, AuthorTsv);
         }
       } else if (category == "vo_chatplus" && !prefix.speaker.empty()) {
         for (const LocalScene& scene : chatScenes) {
-          emitTakes(prefix.path + scene.stem + '_' + prefix.speaker + '_' + scene.contentId, prefix.speaker, scene.maxTake, 0);
+          emitTakes(prefix.path + scene.stem + '_' + prefix.speaker + '_' + scene.contentId, prefix.speaker, scene.maxTake, 0, TextMapChat);
         }
       } else if (category == "vo_tl" && !prefix.speaker.empty()) {
         for (const NumberedStem& stem : timelineStems) {
-          emitTakes(prefix.path + stem.stem + '_' + prefix.speaker, prefix.speaker, stem.maxTake, 0);
+          emitTakes(prefix.path + stem.stem + '_' + prefix.speaker, prefix.speaker, stem.maxTake, 0, TextMapTimeline);
         }
       } else if (category == "vo_message" && !prefix.speaker.empty()) {
         emitTakes(prefix.path + "Message_SayHello_" + prefix.speaker, prefix.speaker, 3, 0);
@@ -1289,9 +1381,14 @@ int main(int argc, char** argv) {
   };
   for (unsigned i = 0; i < threadCount; ++i) threads.emplace_back(patternWorker);
   for (std::thread& thread : threads) thread.join();
-  logTiming("crack author naming patterns (" + std::to_string(rawPrefixes.size()) + " prefixes)", patternCrackStart);
+  logTiming("crack game-derived naming patterns (" + std::to_string(rawPrefixes.size()) + " prefixes)", patternCrackStart);
 
   const auto mergeStart = Clock::now();
+  const std::size_t generatedCandidates = matches.size();
+  matches.erase(std::remove_if(matches.begin(), matches.end(), [](const Match& match) {
+    return (match.evidence & gameEvidenceMask) == 0;
+  }), matches.end());
+  std::cerr << "Rejected " << generatedCandidates - matches.size() << " candidate hits without a game-only evidence chain\n";
   std::sort(matches.begin(), matches.end(), [](const Match& left, const Match& right) {
     if (left.hash != right.hash) return left.hash < right.hash;
     const std::string leftSource = lower(left.source);
@@ -1306,8 +1403,21 @@ int main(int argc, char** argv) {
   for (Match& match : matches) {
     if (!mergedMatches.empty() && mergedMatches.back().hash == match.hash && lower(mergedMatches.back().source) == lower(match.source)) {
       Match& merged = mergedMatches.back();
-      if (merged.speaker.empty()) merged.speaker = std::move(match.speaker);
-      if (merged.sourceKey.empty()) merged.sourceKey = std::move(match.sourceKey);
+      merged.evidence |= match.evidence;
+      if ((merged.evidence & SpeakerConflict) == 0 && !match.speaker.empty()) {
+        if (merged.speaker.empty()) merged.speaker = std::move(match.speaker);
+        else if (lower(merged.speaker) != lower(match.speaker)) {
+          merged.speaker.clear();
+          merged.evidence |= SpeakerConflict;
+        }
+      }
+      if ((merged.evidence & SourceKeyConflict) == 0 && !match.sourceKey.empty()) {
+        if (merged.sourceKey.empty()) merged.sourceKey = std::move(match.sourceKey);
+        else if (lower(merged.sourceKey) != lower(match.sourceKey)) {
+          merged.sourceKey.clear();
+          merged.evidence |= SourceKeyConflict;
+        }
+      }
       continue;
     }
     mergedMatches.push_back(std::move(match));
@@ -1317,17 +1427,32 @@ int main(int argc, char** argv) {
 
   const auto outputStart = Clock::now();
   if (!outputPath.parent_path().empty()) fs::create_directories(outputPath.parent_path());
-  std::ofstream output(outputPath, std::ios::binary);
+  fs::path temporaryPath = outputPath;
+  temporaryPath += ".tmp";
+  std::ofstream output(temporaryPath, std::ios::binary);
   if (!output) {
-    std::cerr << "Cannot write " << outputPath << '\n';
+    std::cerr << "Cannot write " << temporaryPath << '\n';
     return 1;
   }
-  for (const Match& match : matches) output << hexOf(match.hash) << '\t' << match.speaker << '\t' << match.source << '\t' << match.sourceKey << '\n';
+  for (const Match& match : matches) {
+    output << hexOf(match.hash) << '\t' << match.speaker << '\t' << match.source << '\t' << match.sourceKey << '\t' << evidenceText(match.evidence) << '\n';
+  }
+  output.close();
+  if (!output || !replaceFile(temporaryPath, outputPath)) {
+    std::cerr << "Cannot replace " << outputPath << '\n';
+    std::error_code ignored;
+    fs::remove(temporaryPath, ignored);
+    return 1;
+  }
   logTiming("write hash matches", outputStart);
   std::cout << "Cracked " << matches.size() << " exact filename matches into " << outputPath << '\n';
   const auto eventIndexStart = Clock::now();
-  const std::size_t eventCount = writeEventWavIndex(resultRoot, eventOutputPath);
-  logTiming("write event WAV index (" + std::to_string(eventCount) + " events)", eventIndexStart);
-  std::cout << "Indexed " << eventCount << " BNK events into " << eventOutputPath << '\n';
+  const auto eventCount = writeEventWavIndex(resultRoot, eventOutputPath);
+  if (!eventCount) {
+    std::cerr << "Cannot build event WAV index " << eventOutputPath << '\n';
+    return 1;
+  }
+  logTiming("write event WAV index (" + std::to_string(*eventCount) + " events)", eventIndexStart);
+  std::cout << "Indexed " << *eventCount << " BNK events into " << eventOutputPath << '\n';
   return 0;
 }
