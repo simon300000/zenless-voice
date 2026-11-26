@@ -6,16 +6,18 @@ Hugging Face 🤗  [Zenless-Voice](https://huggingface.co/datasets/simon3000/zen
 
 ModelScope [Zenless-Voice](https://modelscope.cn/datasets/simono/zenless-voice)
 
+Per-speaker downloads are grouped by language and ZIP size. Browse every archive in the [ZIP index](https://huggingface.co/datasets/simon3000/zenless-voice/blob/main/speaker-archives/README.md).
+
 <!-- STATS -->
-Last update at `2026-07-16`, game version `3.0.0`
+Last update at `2026-09-17`, game version `3.2.0`
 
-`360691` wavs
+`406720` wavs
 
-`83759` without speaker (23%)
+`78785` without speaker (19%)
 
-`113302` without transcription (31%)
+`123429` without transcription (30%)
 
-`7020` without inGameFilename (2%)
+`83509` without inGameFilename (21%)
 <!-- STATS_END -->
 
 ## Dataset Details
